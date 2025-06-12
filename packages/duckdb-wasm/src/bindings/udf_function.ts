@@ -1,5 +1,4 @@
-import { SQLType } from '../json_typedef';
-import * as arrow from 'apache-arrow';
+import { SQLType } from '../sql_field';
 
 export interface UDFFunctionDeclaration {
     functionId: number;
@@ -11,6 +10,6 @@ export interface UDFFunction {
     functionId: number;
     connectionId: number;
     name: string;
-    returnType: arrow.DataType;
+    returnType: SQLType;
     func: (...args: any[]) => any;
 }

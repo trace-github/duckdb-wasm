@@ -9,10 +9,8 @@ import { dropResponseBuffers, DuckDBRuntime, readString, callSRet, copyBuffer, D
 import { CSVInsertOptions, JSONInsertOptions, ArrowInsertOptions } from './insert_options';
 import { ScriptTokens } from './tokens';
 import { FileStatistics } from './file_stats';
-import { arrowToSQLField, arrowToSQLType } from '../json_typedef';
 import { WebFile } from './web_file';
-import { UDFFunction, UDFFunctionDeclaration } from './udf_function';
-import * as arrow from 'apache-arrow';
+// import { UDFFunction, UDFFunctionDeclaration } from './udf_function';
 
 const TEXT_ENCODER = new TextEncoder();
 
@@ -28,6 +26,10 @@ export enum DuckDBFeature {
     WASM_SIMD = 1 << 2,
     WASM_BULK_MEMORY = 1 << 3,
     EMIT_BIGINT = 1 << 4,
+}
+
+function isNotSuccess(s: StatusCode) {
+    return s !== StatusCode.SUCCESS;
 }
 
 /** The proxy for either the browser- order node-based DuckDB API */
@@ -282,48 +284,48 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     }
 
     /** Create a scalar function */
-    public createScalarFunction(
-        conn: number,
-        name: string,
-        returns: arrow.DataType,
-        func: (...args: any[]) => void,
-    ): void {
-        const decl: UDFFunctionDeclaration = {
-            functionId: this._nextUDFId,
-            name: name,
-            returnType: arrowToSQLType(returns),
-        };
-        const def: UDFFunction = {
-            functionId: decl.functionId,
-            connectionId: conn,
-            name: name,
-            returnType: returns,
-            func,
-        };
-        this._nextUDFId += 1;
-        const [s, d, n] = callSRet(
-            this.mod,
-            'duckdb_web_udf_scalar_create',
-            ['number', 'string'],
-            [conn, JSON.stringify(decl)],
-        );
-        if (s !== StatusCode.SUCCESS) {
-            throw new Error(readString(this.mod, d, n));
-        }
-        dropResponseBuffers(this.mod);
-        globalThis.DUCKDB_RUNTIME._udfFunctions = (globalThis.DUCKDB_RUNTIME._udfFunctions || new Map()).set(
-            def.functionId,
-            def,
-        );
-        if (this.pthread) {
-            for (const worker of [...this.pthread.runningWorkers, ...this.pthread.unusedWorkers]) {
-                worker.postMessage({
-                    cmd: 'registerUDFFunction',
-                    udf: def,
-                });
-            }
-        }
-    }
+    // public createScalarFunction(
+    //     conn: number,
+    //     name: string,
+    //     returns: arrow.DataType,
+    //     func: (...args: any[]) => void,
+    // ): void {
+    //     const decl: UDFFunctionDeclaration = {
+    //         functionId: this._nextUDFId,
+    //         name: name,
+    //         returnType: arrowToSQLType(returns),
+    //     };
+    //     const def: UDFFunction = {
+    //         functionId: decl.functionId,
+    //         connectionId: conn,
+    //         name: name,
+    //         returnType: returns,
+    //         func,
+    //     };
+    //     this._nextUDFId += 1;
+    //     const [s, d, n] = callSRet(
+    //         this.mod,
+    //         'duckdb_web_udf_scalar_create',
+    //         ['number', 'string'],
+    //         [conn, JSON.stringify(decl)],
+    //     );
+    //     if (s !== StatusCode.SUCCESS) {
+    //         throw new Error(readString(this.mod, d, n));
+    //     }
+    //     dropResponseBuffers(this.mod);
+    //     globalThis.DUCKDB_RUNTIME._udfFunctions = (globalThis.DUCKDB_RUNTIME._udfFunctions || new Map()).set(
+    //         def.functionId,
+    //         def,
+    //     );
+    //     if (this.pthread) {
+    //         for (const worker of [...this.pthread.runningWorkers, ...this.pthread.unusedWorkers]) {
+    //             worker.postMessage({
+    //                 cmd: 'registerUDFFunction',
+    //                 udf: def,
+    //             });
+    //         }
+    //     }
+    // }
 
     /** Prepare a statement and return its identifier */
     public createPrepared(conn: number, text: string): number {
@@ -338,7 +340,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
             [conn, bufferPtr, BUF.length],
         );
         this.mod._free(bufferPtr);
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         dropResponseBuffers(this.mod);
@@ -348,7 +350,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     /** Close a prepared statement */
     public closePrepared(conn: number, statement: number): void {
         const [s, d, n] = callSRet(this.mod, 'duckdb_web_prepared_close', ['number', 'number'], [conn, statement]);
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         dropResponseBuffers(this.mod);
@@ -362,7 +364,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
             ['number', 'number', 'string'],
             [conn, statement, JSON.stringify(params)],
         );
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         const res = copyBuffer(this.mod, d, n);
@@ -378,7 +380,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
             ['number', 'number', 'string'],
             [conn, statement, JSON.stringify(params)],
         );
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         const res = copyBuffer(this.mod, d, n);
@@ -410,16 +412,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     /** Insert csv from path */
     public insertCSVFromPath(conn: number, path: string, options: CSVInsertOptions): void {
         // Stringify options
-        if (options.columns !== undefined) {
-            options.columnsFlat = [];
-            for (const k in options.columns) {
-                options.columnsFlat.push(arrowToSQLField(k, options.columns[k]));
-            }
-        }
-        const opt = { ...options } as any;
-        opt.columns = opt.columnsFlat;
-        delete opt.columnsFlat;
-        const optJSON = JSON.stringify(opt);
+        const optJSON = JSON.stringify(options);
 
         // Call wasm function
         const [s, d, n] = callSRet(
@@ -428,23 +421,14 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
             ['number', 'string', 'string'],
             [conn, path, optJSON],
         );
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
     }
     /** Insert json from path */
     public insertJSONFromPath(conn: number, path: string, options: JSONInsertOptions): void {
         // Stringify options
-        if (options.columns !== undefined) {
-            options.columnsFlat = [];
-            for (const k in options.columns) {
-                options.columnsFlat.push(arrowToSQLField(k, options.columns[k]));
-            }
-        }
-        const opt = { ...options } as any;
-        opt.columns = opt.columnsFlat;
-        delete opt.columnsFlat;
-        const optJSON = JSON.stringify(opt);
+        const optJSON = JSON.stringify(options);
 
         // Call wasm function
         const [s, d, n] = callSRet(
@@ -453,14 +437,14 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
             ['number', 'string', 'string'],
             [conn, path, optJSON],
         );
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
     }
     /** Glob file infos */
     public globFiles(path: string): WebFile[] {
         const [s, d, n] = callSRet(this.mod, 'duckdb_web_fs_glob_file_infos', ['string'], [path]);
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         const infoStr = readString(this.mod, d, n);
@@ -482,7 +466,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
             ['string', 'string'],
             [name, url, proto, directIO],
         );
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         dropResponseBuffers(this.mod);
@@ -503,7 +487,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
             ['string', 'number', 'number'],
             [name, ptr, buffer.length],
         );
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         dropResponseBuffers(this.mod);
@@ -589,7 +573,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
             ['string', 'string', 'number', 'boolean'],
             [name, name, protocol, directIO],
         );
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         dropResponseBuffers(this.mod);
@@ -616,7 +600,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     /** Drop file */
     public dropFile(name: string): void {
         const [s, d, n] = callSRet(this.mod, 'duckdb_web_fs_drop_file', ['string'], [name]);
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         dropResponseBuffers(this.mod);
@@ -624,7 +608,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     /** Drop files */
     public dropFiles(): void {
         const [s, d, n] = callSRet(this.mod, 'duckdb_web_fs_drop_files', [], []);
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         dropResponseBuffers(this.mod);
@@ -636,7 +620,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     /** Write a file to a path */
     public copyFileToPath(name: string, path: string): void {
         const [s, d, n] = callSRet(this.mod, 'duckdb_web_copy_file_to_path', ['string', 'string'], [name, path]);
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         dropResponseBuffers(this.mod);
@@ -644,7 +628,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     /** Write a file to a buffer */
     public copyFileToBuffer(name: string): Uint8Array {
         const [s, d, n] = callSRet(this.mod, 'duckdb_web_copy_file_to_buffer', ['string'], [name]);
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         const buffer = this.mod.HEAPU8.subarray(d, d + n);
@@ -663,14 +647,14 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     }
     public collectFileStatistics(file: string, enable: boolean): void {
         const [s, d, n] = callSRet(this.mod, 'duckdb_web_collect_file_stats', ['string', 'boolean'], [file, enable]);
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
     }
     /** Export file statistics */
     public exportFileStatistics(file: string): FileStatistics {
         const [s, d, n] = callSRet(this.mod, 'duckdb_web_export_file_stats', ['string'], [file]);
-        if (s !== StatusCode.SUCCESS) {
+        if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
         return new FileStatistics(this.mod.HEAPU8.subarray(d, d + n));

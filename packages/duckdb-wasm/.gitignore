@@ -7,3 +7,10 @@
 /dist
 /docs
 *.d.ts.map
+src/bindings/duckdb-coi.js
+src/bindings/duckdb-coi.pthread.js
+src/bindings/duckdb-coi.wasm
+src/bindings/duckdb-eh.js
+src/bindings/duckdb-eh.wasm
+src/bindings/duckdb-mvp.js
+src/bindings/duckdb-mvp.wasm

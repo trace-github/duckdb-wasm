@@ -1,5 +1,5 @@
 import { Logger } from '../log';
-import { CSVInsertOptions, JSONInsertOptions } from '../bindings/insert_options';
+import { ArrowInsertOptions, CSVInsertOptions, JSONInsertOptions } from '../bindings/insert_options';
 import { DuckDBDataProtocol } from '../bindings';
 
 /** An interface for the async DuckDB bindings */
@@ -29,7 +29,7 @@ export interface AsyncDuckDBBindings {
     runPrepared(conn: number, statement: number, params: any[]): Promise<Uint8Array>;
     sendPrepared(conn: number, statement: number, params: any[]): Promise<Uint8Array>;
 
-    insertArrowFromIPCStream(conn: number, buffer: Uint8Array, options?: CSVInsertOptions): Promise<void>;
+    insertArrowFromIPCStream(conn: number, buffer: Uint8Array,  options?: ArrowInsertOptions): Promise<void>;
     insertCSVFromPath(conn: number, path: string, options: CSVInsertOptions): Promise<void>;
     insertJSONFromPath(conn: number, path: string, options: JSONInsertOptions): Promise<void>;
 }

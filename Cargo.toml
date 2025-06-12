@@ -1,6 +1,0 @@
-[workspace]
-
-members = [
-    "tools/dataprep",
-    "packages/duckdb-wasm-shell/crate",
-]

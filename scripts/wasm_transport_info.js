@@ -5,7 +5,7 @@
 const zlib = require('node:zlib');
 const http = require('node:http');
 const fs = require('node:fs');
-const { pipeline, Duplex, Writable, Transform } = require('node:stream');
+const { pipeline, Writable, Transform } = require('node:stream');
 
 class ByteCounter extends Transform {
   constructor(options){
@@ -25,10 +25,8 @@ class NullSinc extends Writable {
   }
 }
 
-
-
 function retrieveFile(path, acceptEncoding){
-  const raw = fs.createReadStream(__dirname + '/../lib/build/wasm' + path);
+  const raw = fs.createReadStream(__dirname + '/../build' + path);
   const onError = (err) => {
     if (err) {
       // If an error occurs, there's not much we can do because
@@ -40,7 +38,7 @@ function retrieveFile(path, acceptEncoding){
       console.error('An error occurred:', err);
     }
   };
-  
+
   const uncompressed = new ByteCounter()
   const content = new ByteCounter()
   let encoding;
@@ -71,22 +69,22 @@ function getTime(){
 async function compare() {
   const sizeTable = {}
   const timeTable = {}
-  for(const mode of ['relperf', 'relsize', 'dev']){
-    for(const feature of ['coi', 'eh', 'mvp']){
+  for (const mode of ['relsize']) { //'relperf', 'relsize', 'dev']){
+    for (const feature of ['coi', 'eh', 'mvp']){
       const key = `${mode}-${feature}`;
       sizeTable[key] = {}
       timeTable[key] = {}
-      for(const encoding of ['br', 'gzip', 'deflate', 'identity']){
+      for (const encoding of ['br', 'gzip', 'deflate', 'identity']){
         console.time(key + ' ' + encoding)
-        try{
+        try {
           const nl = new NullSinc()
           const t0 = getTime()
-          const {content} = retrieveFile(`/${key}/duckdb_wasm.wasm`, encoding)
+          const {content} = retrieveFile(`/${mode}/${feature}/duckdb_wasm.wasm`, encoding)
           content.pipe(nl);
           await new Promise(resolve => content.once('end', resolve))
           timeTable[key][encoding] = getTime() - t0;
-          sizeTable[key][encoding] = content.byteLength;  
-        }catch(e) {
+          sizeTable[key][encoding] = content.byteLength;
+        } catch (e) {
           console.log(e)
           console.log(`${key} ${encoding} failed`)
         }
@@ -94,9 +92,9 @@ async function compare() {
       }
     }
   }
-  console.log('Writing results to to misc/compression.json')
-  fs.writeFileSync(__dirname + '/../misc/compression.json', 
-    JSON.stringify({size: sizeTable, time: timeTable}, null, 2))
+  // console.log('Writing results to to misc/compression.json')
+  // fs.writeFileSync(__dirname + '/../misc/compression.json',
+  //   JSON.stringify({size: sizeTable, time: timeTable}, null, 2))
 }
 
 if(process.argv.includes('--compare')){
@@ -121,33 +119,33 @@ if(process.argv.includes('--serve')){
     console.log(request.url, acceptEncoding)
     const {content, encoding} = retrieveFile(path, queryEncoding || acceptEncoding)
     response.writeHead(200, {
-      'Content-Encoding': encoding, 
+      'Content-Encoding': encoding,
       'Access-Control-Allow-Origin': "*",
       'Vary': "Accept-Encoding"
     })
     content.pipe(response);
-  
+
   }).listen(port);
 
   // To test the serve you could do something like
   // curl -H --compressed 'Accept-Encoding: gzip' 127.0.0.1:1337/relperf-coi/duckdb_wasm.wasm | wc -c
   // curl -H 'Accept-Encoding: gzip' 127.0.0.1:1337/relperf-coi/duckdb_wasm.wasm | wc -c
   // curl -H 'Accept-Encoding: br' 127.0.0.1:1337/relperf-coi/duckdb_wasm.wasm | wc -c
-  // 
-  // You could also test it from a browser
-  async function _checkIntegrity(){
-    const ref = await (await fetch('http://127.0.0.1:1337/relperf-coi/duckdb_wasm.wasm?identity')).text()
-    
-    if(ref !== await (await fetch('http://127.0.0.1:1337/relperf-coi/duckdb_wasm.wasm?br')).text()){
-      console.log('Brotli encoding failed')
-    }
-  
-    if(ref !== await (await fetch('http://127.0.0.1:1337/relperf-coi/duckdb_wasm.wasm?deflate')).text()){
-      console.log('Deflate failed')
-    }
-  
-    if(ref !== await (await fetch('http://127.0.0.1:1337/relperf-coi/duckdb_wasm.wasm?gzip')).text()){
-      console.log('gzip failed')
-    }
-  }
+  //
+  // You could also test it from a browser, like so:
+  // async function _checkIntegrity(){
+  //   const ref = await (await fetch('http://127.0.0.1:1337/relperf-coi/duckdb_wasm.wasm?identity')).text()
+
+  //   if(ref !== await (await fetch('http://127.0.0.1:1337/relperf-coi/duckdb_wasm.wasm?br')).text()){
+  //     console.log('Brotli encoding failed')
+  //   }
+
+  //   if(ref !== await (await fetch('http://127.0.0.1:1337/relperf-coi/duckdb_wasm.wasm?deflate')).text()){
+  //     console.log('Deflate failed')
+  //   }
+
+  //   if(ref !== await (await fetch('http://127.0.0.1:1337/relperf-coi/duckdb_wasm.wasm?gzip')).text()){
+  //     console.log('gzip failed')
+  //   }
+  // }
 }

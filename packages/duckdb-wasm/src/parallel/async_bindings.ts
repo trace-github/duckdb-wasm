@@ -15,7 +15,6 @@ import { ScriptTokens } from '../bindings/tokens';
 import { FileStatistics } from '../bindings/file_stats';
 import { DuckDBConfig } from '../bindings/config';
 import { InstantiationProgress } from '../bindings/progress';
-import { arrowToSQLField } from '../json_typedef';
 import { WebFile } from '../bindings/web_file';
 import { DuckDBDataProtocol } from '../bindings';
 import { ProgressEntry } from '../log';
@@ -43,7 +42,7 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
     /** The promise for the worker shutdown */
     protected _workerShutdownPromise: Promise<null> | null = null;
     /** Make the worker as terminated */
-    protected _workerShutdownResolver: (value: PromiseLike<null> | null) => void = () => {};
+    protected _workerShutdownResolver: (value: PromiseLike<null> | null) => void = () => { };
 
     /** The next message id */
     protected _nextMessageId = 0;
@@ -85,7 +84,7 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
         this._worker = null;
         this._workerShutdownResolver(null);
         this._workerShutdownPromise = null;
-        this._workerShutdownResolver = () => {};
+        this._workerShutdownResolver = () => { };
     }
 
     /** Kill the worker */
@@ -95,7 +94,7 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
         //await this._workerShutdownPromise; TODO deadlocking in karma?
         this._worker = null;
         this._workerShutdownPromise = null;
-        this._workerShutdownResolver = () => {};
+        this._workerShutdownResolver = () => { };
     }
 
     /** Post a task */
@@ -341,7 +340,7 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
     public async instantiate(
         mainModuleURL: string,
         pthreadWorkerURL: string | null = null,
-        progress: (progress: InstantiationProgress) => void = _p => {},
+        progress: (progress: InstantiationProgress) => void = _p => { },
     ): Promise<null> {
         this._onInstantiationProgress.push(progress);
         const task = new WorkerTask<WorkerRequestType.INSTANTIATE, [string, string | null], null>(
@@ -619,17 +618,6 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
     }
     /** Insert a csv file */
     public async insertCSVFromPath(conn: ConnectionID, path: string, options: CSVInsertOptions): Promise<void> {
-        // Flatten the table options
-        if (options.columns !== undefined) {
-            const out = [];
-            for (const k in options.columns) {
-                const type = options.columns[k];
-                out.push(arrowToSQLField(k, type));
-            }
-            options.columnsFlat = out;
-            delete options.columns;
-        }
-
         // Pass to the worker
         const task = new WorkerTask<WorkerRequestType.INSERT_CSV_FROM_PATH, [number, string, CSVInsertOptions], null>(
             WorkerRequestType.INSERT_CSV_FROM_PATH,
@@ -639,17 +627,6 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
     }
     /** Insert a json file */
     public async insertJSONFromPath(conn: ConnectionID, path: string, options: JSONInsertOptions): Promise<void> {
-        // Flatten the table options
-        if (options.columns !== undefined) {
-            const out = [];
-            for (const k in options.columns) {
-                const type = options.columns[k];
-                out.push(arrowToSQLField(k, type));
-            }
-            options.columnsFlat = out;
-            delete options.columns;
-        }
-
         // Pass to the worker
         const task = new WorkerTask<WorkerRequestType.INSERT_JSON_FROM_PATH, [number, string, JSONInsertOptions], null>(
             WorkerRequestType.INSERT_JSON_FROM_PATH,

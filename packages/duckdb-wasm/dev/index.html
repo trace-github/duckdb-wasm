@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+  <body>
+    <script type="module">
+      import { tableFromIPC } from '@uwdata/flechette';
+      import { ConsoleLogger, duckdb, selectBundle } from '/src/index.js';
+
+      function path(file) {
+        return `/dist/${file}`;
+      }
+
+      function print(value) {
+        const data = tableFromIPC(value).toArray();
+        return console.log(JSON.stringify(data));
+      }
+
+      async function run(fn) {
+        const t0 = Date.now();
+          print(await fn());
+          console.log('ELAPSED TIME (ms)', Date.now() - t0);
+      }
+
+      try {
+        const t0 = Date.now();
+        const bundle = await selectBundle({
+          mvp: {
+            mainModule: path('duckdb-mvp.wasm'),
+            mainWorker: path('duckdb-browser-mvp.worker.js'),
+          },
+          eh: {
+            mainModule: path('duckdb-eh.wasm'),
+            mainWorker: path('duckdb-browser-eh.worker.js'),
+          },
+          coi: {
+            mainModule: path('duckdb-coi.wasm'),
+            mainWorker: path('duckdb-browser-coi.worker.js'),
+            pthreadWorker: path('duckdb-browser-coi.pthread.worker.js'),
+          },
+        });
+        // console.log('BUNDLE', bundle);
+
+        const db = await duckdb(bundle, new ConsoleLogger());
+        if (crossOriginIsolated) await db.open({ maximumThreads: 8 });
+        const conn = await db.connect();
+
+        console.log('READY', Date.now() - t0);
+        console.log('COI?', crossOriginIsolated);
+
+        print(
+          await conn.query(`SELECT current_setting('threads')::INTEGER AS threadCount;`)
+        );
+        print(
+          await conn.query(`SELECT list(collname) AS collations FROM pragma_collations();`)
+        );
+        print(
+          await conn.query(`SELECT count(*)::INTEGER as v FROM generate_series(0, 100) t(v);`)
+        );
+
+        window.loadFlights = async () => {
+          const url = `${location.origin}/dev/flights-10m.parquet`;
+          await conn.query(`CREATE TABLE flights AS SELECT * FROM '${url}'`);
+          const t0 = Date.now();
+          await run(
+            () => conn.query(`SELECT
+              FLOOR(DEP_TIME) AS time,
+              COUNT(*) AS count
+            FROM flights
+            GROUP BY time
+            ORDER BY time;`)
+          );
+        };
+
+        // await conn.close();
+        // await db.terminate();
+        // await worker.terminate();
+      } catch (e) {
+        console.error(e);
+      }
+    </script>
+  </body>
+</html>

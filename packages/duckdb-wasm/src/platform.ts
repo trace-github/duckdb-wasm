@@ -1,5 +1,4 @@
 import * as check from 'wasm-feature-detect';
-import { PACKAGE_NAME, PACKAGE_VERSION } from './version';
 
 // Platform check taken from here:
 // https://github.com/xtermjs/xterm.js/blob/master/src/common/Platform.ts#L21
@@ -40,20 +39,20 @@ export interface DuckDBBundles {
     };
 }
 
-export function getJsDelivrBundles(): DuckDBBundles {
-    const jsdelivr_dist_url = `https://cdn.jsdelivr.net/npm/${PACKAGE_NAME}@${PACKAGE_VERSION}/dist/`;
-    return {
-        mvp: {
-            mainModule: `${jsdelivr_dist_url}duckdb-mvp.wasm`,
-            mainWorker: `${jsdelivr_dist_url}duckdb-browser-mvp.worker.js`,
-        },
-        eh: {
-            mainModule: `${jsdelivr_dist_url}duckdb-eh.wasm`,
-            mainWorker: `${jsdelivr_dist_url}duckdb-browser-eh.worker.js`,
-        },
-        // COI is still experimental, let the user opt in explicitly
-    };
-}
+// export function getJsDelivrBundles(): DuckDBBundles {
+//     const jsdelivr_dist_url = `https://cdn.jsdelivr.net/npm/${PACKAGE_NAME}@${PACKAGE_VERSION}/dist/`;
+//     return {
+//         mvp: {
+//             mainModule: `${jsdelivr_dist_url}duckdb-mvp.wasm`,
+//             mainWorker: `${jsdelivr_dist_url}duckdb-browser-mvp.worker.js`,
+//         },
+//         eh: {
+//             mainModule: `${jsdelivr_dist_url}duckdb-eh.wasm`,
+//             mainWorker: `${jsdelivr_dist_url}duckdb-browser-eh.worker.js`,
+//         },
+//         // COI is still experimental, let the user opt in explicitly
+//     };
+// }
 
 export interface DuckDBBundle {
     mainModule: string;
@@ -98,12 +97,12 @@ export async function getPlatformFeatures(): Promise<PlatformFeatures> {
         wasmBulkMemory = await check.bulkMemory();
     }
     return {
-        bigInt64Array: bigInt64Array!,
+        bigInt64Array,
         crossOriginIsolated: isNode() || globalThis.crossOriginIsolated || false,
-        wasmExceptions: wasmExceptions!,
-        wasmSIMD: wasmSIMD!,
-        wasmThreads: wasmThreads!,
-        wasmBulkMemory: wasmBulkMemory!,
+        wasmExceptions,
+        wasmSIMD,
+        wasmThreads,
+        wasmBulkMemory,
     };
 }
 

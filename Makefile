@@ -13,7 +13,7 @@ LIB_DEBUG_DIR="${ROOT_DIR}/build/Debug"
 LIB_RELEASE_DIR="${ROOT_DIR}/build/Release"
 LIB_RELWITHDEBINFO_DIR="${ROOT_DIR}/build/RelWithDebInfo"
 LIB_XRAY_DIR="${ROOT_DIR}/build/Xray"
-DUCKDB_WASM_DIR="${ROOT_DIR}/packages/duckdb/src/wasm"
+DUCKDB_WASM_DIR="${ROOT_DIR}/packages/duckdb-wasm/src/wasm"
 TARGET=eh
 
 DUCKDB_HASH=${shell cd submodules/duckdb && git reflog -n 1 | head -c 10}
@@ -30,6 +30,24 @@ EXTENSION_CACHE_DIR="${ROOT_DIR}/.ccache/extension"
 JSON_EXTENSION_CACHE_FILE="${EXTENSION_CACHE_DIR}/json"
 
 cpp_lib: lib_tests
+
+# ---------------------------------------------------------------------------
+# Build
+
+.PHONY: build_wasm_mvp
+build_wasm_mvp:
+	USE_GENERATED_EXPORTED_LIST=no DUCKDB_PLATFORM=wasm_mvp ./scripts/wasm_build_lib.sh relsize mvp
+
+.PHONY: build_wasm_eh
+build_wasm_eh:
+	USE_GENERATED_EXPORTED_LIST=no DUCKDB_PLATFORM=wasm_eh ./scripts/wasm_build_lib.sh relsize eh
+
+.PHONY: build_wasm_coi
+build_wasm_coi:
+	USE_GENERATED_EXPORTED_LIST=no DUCKDB_PLATFORM=wasm_threads ./scripts/wasm_build_lib.sh relsize coi
+
+.PHONY: build_wasm_all
+build_wasm_all: build_wasm_mvp build_wasm_eh build_wasm_coi
 
 # ---------------------------------------------------------------------------
 # Formatting
@@ -424,10 +442,8 @@ compile_commands:
 clean:
 	rm -rf build
 	rm -rf target
-	cd packages/duckdb-wasm-shell && rm -rf node_modules
-	rm -rf packages/duckdb-wasm-app/build
 	rm -rf submodules/duckdb/build
-	rm -rf packages/duckdb-wasm/dist
+	rm -rf dist
 
 build/docker_ci_image:
 	command -v emcc &> /dev/null || docker compose build
