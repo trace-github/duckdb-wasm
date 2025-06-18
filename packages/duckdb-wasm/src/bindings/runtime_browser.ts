@@ -243,7 +243,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                     // Supports ranges?
                     let contentLength = null;
                     let error: any | null = null;
-                    if (file.reliableHeadRequests || !file.allowFullHttpReads) {
+                    if (!file.forceFullHttpReads && (file.reliableHeadRequests || !file.allowFullHttpReads)) {
                         try {
                             // Send a dummy HEAD request with range protocol
                             //          -> good IFF status is 206 and contentLenght is present
@@ -273,7 +273,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
 
                     // Try to fallback to full read?
                     if (file.allowFullHttpReads) {
-                        {
+                        if (!file.forceFullHttpReads) {
                             // 2. Send a dummy GET range request querying the first byte of the file
                             //          -> good IFF status is 206 and contentLenght2 is 1
                             //          -> otherwise, iff 200 and contentLenght2 == contentLenght
@@ -340,8 +340,12 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                                 mod.HEAPF64[(result >> 3) + 1] = data;
                                 return result;
                             }
+                            console.warn(`falling back to full HTTP read for: ${file.dataUrl}`);
                         }
-                        console.warn(`falling back to full HTTP read for: ${file.dataUrl}`);
+
+                        console.error('HELLO!');
+                        console.warn(`Making full HTTP read`, JSON.stringify(file));
+
                         // 3. Send non-range request
                         const xhr = new XMLHttpRequest();
                         if (file.dataProtocol == DuckDBDataProtocol.S3) {
@@ -424,7 +428,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                     xhr.open('HEAD', getHTTPUrl(globalInfo?.s3Config, path), false);
                     addS3Headers(xhr, globalInfo?.s3Config, path, 'HEAD');
                 } else {
-                    xhr.open('HEAD', path!, false);
+                    xhr.open('HEAD', path, false);
                 }
                 xhr.send(null);
                 if (xhr.status != 200 && xhr.status !== 206) {
@@ -441,7 +445,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                         xhr2.open('GET', getHTTPUrl(globalInfo?.s3Config, path), false);
                         addS3Headers(xhr2, globalInfo?.s3Config, path, 'HEAD');
                     } else {
-                        xhr2.open('GET', path!, false);
+                        xhr2.open('GET', path, false);
                     }
                     xhr2.setRequestHeader('Range', `bytes=0-0`);
                     xhr2.send(null);
@@ -458,7 +462,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                 }
                 mod.ccall('duckdb_web_fs_glob_add_path', null, ['string'], [path]);
             } else {
-                for (const [filePath] of BROWSER_RUNTIME._files!.entries() || []) {
+                for (const [filePath] of BROWSER_RUNTIME._files.entries() || []) {
                     if (filePath.startsWith(path)) {
                         mod.ccall('duckdb_web_fs_glob_add_path', null, ['string'], [filePath]);
                     }
@@ -483,7 +487,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                     xhr.open('HEAD', getHTTPUrl(globalInfo?.s3Config, path), false);
                     addS3Headers(xhr, globalInfo?.s3Config, path, 'HEAD');
                 } else {
-                    xhr.open('HEAD', path!, false);
+                    xhr.open('HEAD', path, false);
                 }
                 xhr.send(null);
                 return xhr.status == 206 || xhr.status == 200;
@@ -496,7 +500,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
         }
         return false;
     },
-    syncFile: (_mod: DuckDBModule, _fileId: number) => {},
+    syncFile: (_mod: DuckDBModule, _fileId: number) => { },
     closeFile: (mod: DuckDBModule, fileId: number) => {
         const file = BROWSER_RUNTIME.getFileInfo(mod, fileId);
         BROWSER_RUNTIME._fileInfoCache.delete(fileId);
@@ -583,10 +587,10 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                     try {
                         const xhr = new XMLHttpRequest();
                         if (file.dataProtocol == DuckDBDataProtocol.S3) {
-                            xhr.open('GET', getHTTPUrl(file?.s3Config, file.dataUrl!), false);
-                            addS3Headers(xhr, file?.s3Config, file.dataUrl!, 'GET');
+                            xhr.open('GET', getHTTPUrl(file?.s3Config, file.dataUrl), false);
+                            addS3Headers(xhr, file?.s3Config, file.dataUrl, 'GET');
                         } else {
-                            xhr.open('GET', file.dataUrl!, false);
+                            xhr.open('GET', file.dataUrl, false);
                         }
                         xhr.responseType = 'arraybuffer';
                         xhr.setRequestHeader('Range', `bytes=${location}-${location + bytes - 1}`);
@@ -728,8 +732,8 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
         const to = readString(mod, toPtr, toLen);
         const handle = BROWSER_RUNTIME._files?.get(from);
         if (handle !== undefined) {
-            BROWSER_RUNTIME._files!.delete(handle);
-            BROWSER_RUNTIME._files!.set(to, handle);
+            BROWSER_RUNTIME._files.delete(handle);
+            BROWSER_RUNTIME._files.set(to, handle);
         }
         for (const [key, value] of BROWSER_RUNTIME._fileInfoCache?.entries() || []) {
             if (value.dataUrl == from) {
@@ -739,7 +743,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
         }
         return true;
     },
-    removeFile: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number) => {},
+    removeFile: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number) => { },
     callScalarUDF: (
         mod: DuckDBModule,
         response: number,

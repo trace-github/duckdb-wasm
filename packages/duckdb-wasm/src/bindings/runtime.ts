@@ -78,6 +78,7 @@ export interface DuckDBFileInfo {
     dataUrl: string | null;
     reliableHeadRequests?: boolean;
     allowFullHttpReads?: boolean;
+    forceFullHttpReads?: boolean;
     s3Config?: S3Config;
 }
 
@@ -86,6 +87,7 @@ export interface DuckDBGlobalFileInfo {
     cacheEpoch: number;
     reliableHeadRequests?: boolean;
     allowFullHttpReads?: boolean;
+    forceFullHttpReads?: boolean;
     s3Config?: S3Config;
 }
 
@@ -181,17 +183,17 @@ export const DEFAULT_RUNTIME: DuckDBRuntime = {
 
     testPlatformFeature: (_mod: DuckDBModule, _feature: number): boolean => false,
     getDefaultDataProtocol: (_mod: DuckDBModule): number => DuckDBDataProtocol.BUFFER,
-    openFile: (_mod: DuckDBModule, _fileId: number, flags: FileFlags): void => {},
-    syncFile: (_mod: DuckDBModule, _fileId: number): void => {},
-    closeFile: (_mod: DuckDBModule, _fileId: number): void => {},
-    dropFile: (_mod: DuckDBModule, _fileNamePtr: number, _fileNameLen: number): void => {},
+    openFile: (_mod: DuckDBModule, _fileId: number, flags: FileFlags): void => { },
+    syncFile: (_mod: DuckDBModule, _fileId: number): void => { },
+    closeFile: (_mod: DuckDBModule, _fileId: number): void => { },
+    dropFile: (_mod: DuckDBModule, _fileNamePtr: number, _fileNameLen: number): void => { },
     getLastFileModificationTime: (_mod: DuckDBModule, _fileId: number): number => {
         return 0;
     },
     progressUpdate: (_final: number, _percentage: number, _iteration: number): void => {
         return;
     },
-    truncateFile: (_mod: DuckDBModule, _fileId: number, _newSize: number): void => {},
+    truncateFile: (_mod: DuckDBModule, _fileId: number, _newSize: number): void => { },
     readFile: (_mod: DuckDBModule, _fileId: number, _buffer: number, _bytes: number, _location: number): number => {
         return 0;
     },
@@ -199,20 +201,20 @@ export const DEFAULT_RUNTIME: DuckDBRuntime = {
         return 0;
     },
 
-    removeDirectory: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => {},
+    removeDirectory: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => { },
     checkDirectory: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): boolean => {
         return false;
     },
-    createDirectory: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => {},
+    createDirectory: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => { },
     listDirectoryEntries: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): boolean => {
         return false;
     },
-    glob: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => {},
-    moveFile: (_mod: DuckDBModule, _fromPtr: number, _fromLen: number, _toPtr: number, _toLen: number): void => {},
+    glob: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => { },
+    moveFile: (_mod: DuckDBModule, _fromPtr: number, _fromLen: number, _toPtr: number, _toLen: number): void => { },
     checkFile: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): boolean => {
         return false;
     },
-    removeFile: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => {},
+    removeFile: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => { },
     callScalarUDF: (
         mod: DuckDBModule,
         response: number,

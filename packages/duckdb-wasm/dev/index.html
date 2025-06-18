@@ -40,7 +40,13 @@
         // console.log('BUNDLE', bundle);
 
         const db = await duckdb(bundle, new ConsoleLogger());
-        if (crossOriginIsolated) await db.open({ maximumThreads: 8 });
+        const config = {
+          maximumThreads: crossOriginIsolated ? 8 : undefined,
+          filesystem: {
+            forceFullHTTPReads: true
+          }
+        }
+        await db.open(config);
         const conn = await db.connect();
 
         console.log('READY', Date.now() - t0);
