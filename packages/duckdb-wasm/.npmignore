@@ -1,0 +1,10 @@
+.github
+.temp
+.DS_Store
+bin/
+karma/
+node_modules/
+temp/
+test/
+jasmine.json
+typedoc.json
