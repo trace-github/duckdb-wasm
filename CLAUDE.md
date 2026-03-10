@@ -36,7 +36,7 @@ A `duckdb-wasm-cache` Docker volume persists ccache across runs:
 
 ### Docker Build Details
 
-- **`Dockerfile`** — Debian image with emscripten 3.1.57, binaryen v126, ccache, Node 20
+- **`Dockerfile`** — Debian image with emscripten 4.0.3 (includes binaryen v126), ccache, Node 20
 - **`docker-build.sh`** — Entrypoint script. Uses `build-docker/` as build prefix to avoid CMake cache conflicts with any host builds
 - **`build-wasm.sh`** — Host-side wrapper. Builds the image, creates the cache volume, bind-mounts the repo, runs the build
 - The `DUCKDB_WASM_BUILD_PREFIX` env var in `scripts/wasm_build_lib.sh` controls the build output directory (defaults to `${PROJECT_ROOT}/build` for native, set to `/src/build-docker` in Docker)
@@ -72,8 +72,8 @@ The `patches/` directory contains patch files that were written for older DuckDB
 - Three WASM targets: MVP, EH (exception handling), COI (cross-origin isolation with threads)
 - Extensions (json, parquet, icu, tpcds, tpch) are statically linked via `extension_config_wasm.cmake` and `LoadStaticExtension<T>()` calls
 - Extension init calls are in `lib/src/webdb.cc` (see `duckdb_web_*_init` functions)
-- Emscripten 3.1.57 is pinned in the Dockerfile. Do not change the version.
-- Binaryen v126 is installed in the Dockerfile to replace the emsdk-bundled v117 (which doesn't support `--enable-bulk-memory-opt`)
+- Emscripten 4.0.3 is pinned in the Dockerfile. Do not change the version.
+- Binaryen v126 is bundled with emscripten 4.0.3 (supports `--enable-bulk-memory-opt`)
 
 ### DuckDB v1.4.4 API Notes
 

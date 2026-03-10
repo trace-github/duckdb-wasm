@@ -20,28 +20,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # Install js-beautify globally (needed by wasm_build_lib.sh)
 RUN npm install -g js-beautify
 
-# Install Emscripten SDK 3.1.57
+# Install Emscripten SDK 4.0.3
+# This version natively bundles binaryen v126, which supports
+# --enable-bulk-memory-opt. No separate binaryen install needed.
 ENV EMSDK=/opt/emsdk
 RUN git clone https://github.com/emscripten-core/emsdk.git $EMSDK \
     && cd $EMSDK \
-    && ./emsdk install 3.1.57 \
-    && ./emsdk activate 3.1.57
-
-# Upgrade binaryen to v126.
-# The binaryen bundled with emsdk 3.1.57 (wasm-opt v117) doesn't support
-# --enable-bulk-memory-opt which clang now emits in wasm target features.
-RUN BINARYEN_VERSION=126 && \
-    ARCH=$(uname -m) && \
-    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
-        BINARYEN_ARCH="aarch64"; \
-    else \
-        BINARYEN_ARCH="x86_64"; \
-    fi && \
-    wget -q "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${BINARYEN_ARCH}-linux.tar.gz" -O /tmp/binaryen.tar.gz && \
-    tar xzf /tmp/binaryen.tar.gz -C /tmp && \
-    cp /tmp/binaryen-version_${BINARYEN_VERSION}/bin/* $EMSDK/upstream/bin/ && \
-    cp /tmp/binaryen-version_${BINARYEN_VERSION}/lib/* $EMSDK/upstream/lib/ 2>/dev/null || true && \
-    rm -rf /tmp/binaryen*
+    && ./emsdk install 4.0.3 \
+    && ./emsdk activate 4.0.3
 
 # Set up emscripten in PATH. emsdk activate already wrote .emscripten config.
 ENV PATH="$EMSDK:$EMSDK/upstream/emscripten:$PATH"

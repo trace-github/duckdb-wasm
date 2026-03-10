@@ -107,6 +107,10 @@ fs.copyFile(path.resolve(src, 'bindings', 'duckdb-coi.wasm'), path.resolve(dist,
     patchFile('./src/bindings/duckdb-eh.js', 'child_process');
     patchFile('./src/bindings/duckdb-coi.js', 'child_process');
     patchFile('./src/bindings/duckdb-coi.pthread.js', 'vm');
+    // Emscripten 4.0.3 generates require("crypto") for node compat; patch for browser builds
+    patchFile('./src/bindings/duckdb-mvp.js', 'crypto');
+    patchFile('./src/bindings/duckdb-eh.js', 'crypto');
+    patchFile('./src/bindings/duckdb-coi.js', 'crypto');
 
     // -------------------------------
     // Browser bundles
