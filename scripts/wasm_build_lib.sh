@@ -46,7 +46,7 @@ esac
 echo "MODE=${MODE}"
 echo "FEATURES=${FEATURES}"
 
-BUILD_DIR="${PROJECT_ROOT}/build/${MODE}/${FEATURES}"
+BUILD_DIR="${DUCKDB_WASM_BUILD_PREFIX:-${PROJECT_ROOT}/build}/${MODE}/${FEATURES}"
 mkdir -p ${BUILD_DIR}
 
 set -x
