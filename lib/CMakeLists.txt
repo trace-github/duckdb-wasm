@@ -83,7 +83,7 @@ set(DUCKDB_PLATFORM "wasm_mvp")
 
 if(EMSCRIPTEN)
   # Bump stack size from default 64KB to 1MB
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -sSTACK_SIZE=1048576")
+  set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -sSTACK_SIZE=1048576")
   # Release build
   if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNDEBUG")
@@ -217,6 +217,7 @@ add_library(
   ${CMAKE_SOURCE_DIR}/src/arrow_casts.cc
   ${CMAKE_SOURCE_DIR}/src/arrow_insert_options.cc
   ${CMAKE_SOURCE_DIR}/src/arrow_stream_buffer.cc
+  ${CMAKE_SOURCE_DIR}/src/http_wasm.cc
   ${CMAKE_SOURCE_DIR}/src/arrow_type_mapping.cc
   ${CMAKE_SOURCE_DIR}/src/config.cc
   ${CMAKE_SOURCE_DIR}/src/csv_insert_options.cc

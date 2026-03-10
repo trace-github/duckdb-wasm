@@ -15,6 +15,7 @@
 #include <string_view>
 #include <unordered_map>
 
+#include "../../third_party/mbedtls/include/mbedtls_wrapper.hpp"
 #include "arrow/array/array_dict.h"
 #include "arrow/array/array_nested.h"
 #include "arrow/array/builder_primitive.h"
@@ -32,12 +33,14 @@
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/http_util.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/types/vector_buffer.hpp"
 #include "duckdb/common/virtual_file_system.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/web/arrow_bridge.h"
@@ -51,6 +54,7 @@
 #include "duckdb/web/extensions/json_extension.h"
 #include "duckdb/web/extensions/parquet_extension.h"
 #include "duckdb/web/functions/table_function_relation.h"
+#include "duckdb/web/http_wasm.h"
 #include "duckdb/web/io/arrow_ifstream.h"
 #include "duckdb/web/io/buffered_filesystem.h"
 #include "duckdb/web/io/file_page_buffer.h"
@@ -70,6 +74,10 @@
 #include "rapidjson/writer.h"
 
 namespace duckdb {
+
+bool preloaded_httpfs{true};
+string web::experimental_s3_tables_global_proxy{""};
+
 namespace web {
 
 static constexpr int64_t DEFAULT_QUERY_POLLING_INTERVAL = 100;
@@ -107,7 +115,8 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::MaterializeQuer
     // Configure the output writer
     ArrowSchema raw_schema;
     bool lossless_conversion = webdb_.config_->arrow_lossless_conversion;
-    ClientProperties options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion, connection_.context);
+    ClientProperties options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion,
+                             ArrowFormatVersion::V1_0, connection_.context);
     unordered_map<idx_t, const shared_ptr<ArrowTypeExtensionData>> extension_type_cast;
     options.arrow_offset_size = ArrowOffsetSize::REGULAR;
     ArrowConverter::ToArrowSchema(&raw_schema, result->types, result->names, options);
@@ -144,7 +153,8 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::StreamQueryResu
     // Import the schema
     ArrowSchema raw_schema;
     bool lossless_conversion = webdb_.config_->arrow_lossless_conversion;
-    ClientProperties options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion, connection_.context);
+    ClientProperties options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion,
+                             ArrowFormatVersion::V1_0, connection_.context);
     options.arrow_offset_size = ArrowOffsetSize::REGULAR;
     ArrowConverter::ToArrowSchema(&raw_schema, current_query_result_->types, current_query_result_->names, options);
     ARROW_ASSIGN_OR_RAISE(current_schema_, arrow::ImportSchema(&raw_schema));
@@ -172,9 +182,20 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::RunQuery(std::s
 arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::PendingQuery(std::string_view text,
                                                                               bool allow_stream_result) {
     try {
-        // Send the query
-        auto result = connection_.PendingQuery(std::string{text}, allow_stream_result);
-        if (result->HasError()) return arrow::Status{arrow::StatusCode::ExecutionError, std::move(result->GetError())};
+        auto statements = connection_.ExtractStatements(std::string{text});
+        if (statements.size() == 0) {
+            return arrow::Status{arrow::StatusCode::ExecutionError, "no statements"};
+        }
+        current_pending_statements_ = std::move(statements);
+        current_pending_statement_index_ = 0;
+        current_allow_stream_result_ = allow_stream_result;
+        // Send the first query
+        auto result = connection_.PendingQuery(std::move(current_pending_statements_[current_pending_statement_index_]),
+                                               current_allow_stream_result_);
+        if (result->HasError()) {
+            current_pending_statements_.clear();
+            return arrow::Status{arrow::StatusCode::ExecutionError, std::move(result->GetError())};
+        }
         current_pending_query_result_ = std::move(result);
         current_pending_query_was_canceled_ = false;
         current_query_result_.reset();
@@ -204,8 +225,25 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::PollPendingQuer
     do {
         switch (current_pending_query_result_->ExecuteTask()) {
             case PendingExecutionResult::EXECUTION_FINISHED:
-            case PendingExecutionResult::RESULT_READY:
-                return StreamQueryResult(current_pending_query_result_->Execute());
+            case PendingExecutionResult::RESULT_READY: {
+                auto result = current_pending_query_result_->Execute();
+                current_pending_statement_index_++;
+                // If this was the last statement, then return the result
+                if (current_pending_statement_index_ == current_pending_statements_.size()) {
+                    return StreamQueryResult(std::move(result));
+                }
+                // Otherwise, start the next statement
+                auto pending_result =
+                    connection_.PendingQuery(std::move(current_pending_statements_[current_pending_statement_index_]),
+                                             current_allow_stream_result_);
+                if (pending_result->HasError()) {
+                    current_pending_query_result_.reset();
+                    current_pending_statements_.clear();
+                    return arrow::Status{arrow::StatusCode::ExecutionError, std::move(pending_result->GetError())};
+                }
+                current_pending_query_result_ = std::move(pending_result);
+                break;
+            }
             case PendingExecutionResult::BLOCKED:
             case PendingExecutionResult::NO_TASKS_AVAILABLE:
                 return nullptr;
@@ -214,6 +252,7 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::PollPendingQuer
             case PendingExecutionResult::EXECUTION_ERROR: {
                 auto err = current_pending_query_result_->GetError();
                 current_pending_query_result_.reset();
+                current_pending_statements_.clear();
                 return arrow::Status{arrow::StatusCode::ExecutionError, err};
             }
         }
@@ -228,6 +267,7 @@ bool WebDB::Connection::CancelPendingQuery() {
     if (current_pending_query_result_ != nullptr && current_query_result_ == nullptr) {
         current_pending_query_was_canceled_ = true;
         current_pending_query_result_.reset();
+        current_pending_statements_.clear();
         return true;
     } else {
         return false;
@@ -298,7 +338,7 @@ DuckDBWasmResultsWrapper WebDB::Connection::FetchQueryResults() {
         ArrowArray array;
         bool lossless_conversion = webdb_.config_->arrow_lossless_conversion;
         ClientProperties arrow_options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion,
-                                       connection_.context);
+                                       ArrowFormatVersion::V1_0, connection_.context);
         unordered_map<idx_t, const shared_ptr<ArrowTypeExtensionData>> extension_type_cast;
         arrow_options.arrow_offset_size = ArrowOffsetSize::REGULAR;
         ArrowConverter::ToArrowArray(*chunk, &array, arrow_options, extension_type_cast);
@@ -721,6 +761,9 @@ void WebDB::RegisterCustomExtensionOptions(shared_ptr<duckdb::DuckDB> database) 
 
     // Register S3 Config parameters
     if (webfs) {
+        auto callback_builtin_httpfs = [](ClientContext& context, SetScope scope, Value& parameter) {
+            preloaded_httpfs = BooleanValue::Get(parameter);
+        };
         auto callback_s3_region = [](ClientContext& context, SetScope scope, Value& parameter) {
             auto webfs = io::WebFileSystem::Get();
             webfs->Config()->duckdb_config_options.s3_region = StringValue::Get(parameter);
@@ -751,7 +794,13 @@ void WebDB::RegisterCustomExtensionOptions(shared_ptr<duckdb::DuckDB> database) 
             webfs->Config()->duckdb_config_options.reliable_head_requests = BooleanValue::Get(parameter);
             webfs->IncrementCacheEpoch();
         };
+        auto callback_experimental_s3_tables_global_proxy = [](ClientContext& context, SetScope scope,
+                                                               Value& parameter) {
+            experimental_s3_tables_global_proxy = StringValue::Get(parameter);
+        };
 
+        config.AddExtensionOption("builtin_httpfs", "Use built-in HTTPS support", LogicalType::BOOLEAN, false,
+                                  callback_builtin_httpfs);
         config.AddExtensionOption("s3_region", "S3 Region", LogicalType::VARCHAR, Value(), callback_s3_region);
         config.AddExtensionOption("s3_access_key_id", "S3 Access Key ID", LogicalType::VARCHAR, Value(),
                                   callback_s3_access_key_id);
@@ -763,6 +812,9 @@ void WebDB::RegisterCustomExtensionOptions(shared_ptr<duckdb::DuckDB> database) 
                                   Value(), callback_s3_endpoint);
         config.AddExtensionOption("reliable_head_requests", "Set whether HEAD requests returns reliable content-length",
                                   LogicalType::BOOLEAN, Value(true), callback_reliable_head_requests);
+        config.AddExtensionOption("experimental_s3_tables_global_proxy",
+                                  "Experimental - Global proxy to interact with S3 Tables", LogicalType::VARCHAR,
+                                  Value(""), callback_experimental_s3_tables_global_proxy);
 
         webfs->IncrementCacheEpoch();
     }
@@ -913,7 +965,7 @@ arrow::Status WebDB::Open(std::string_view args_json) {
         duckdb::DBConfig db_config;
         db_config.file_system = std::move(make_uniq<VirtualFileSystem>(std::move(buffered_fs)));
         db_config.options.allow_unsigned_extensions = config_->allow_unsigned_extensions;
-        db_config.options.arrow_lossless_conversion = config_->arrow_lossless_conversion;
+        db_config.SetOption("arrow_lossless_conversion", config_->arrow_lossless_conversion);
         db_config.options.maximum_threads = config_->maximum_threads;
         db_config.options.use_temporary_directory = false;
         db_config.options.access_mode = access_mode;
@@ -928,6 +980,15 @@ arrow::Status WebDB::Open(std::string_view args_json) {
 #endif
 #endif  // WASM_LOADABLE_EXTENSIONS
         RegisterCustomExtensionOptions(db);
+
+        auto& config = duckdb::DBConfig::GetConfig(*db->instance);
+        if (!config.http_util || config.http_util->GetName() != string("WasmHTTPUtils")) {
+            config.http_util = make_shared_ptr<HTTPWasmUtil>();
+        }
+
+        if (!config.encryption_util) {
+            config.encryption_util = make_shared_ptr<duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLSFactory>();
+        }
 
         // Reset state that is specific to the old database
         connections_.clear();

@@ -10,12 +10,6 @@ This project is a fork of the official DuckDB-WASM repository, with some modific
 
 ## Build From Source
 
-The following libraries should be available in the shell:
-
-- C/C++/LLVM build tools (e.g., on Mac, as provided by XCode Command Line Tools)
-- [Emscripten](https://emscripten.org/docs/getting_started/downloads.html) (pegged to version 3.1.57)
-- [CCache](https://ccache.dev/) (e.g., on Mac, via `brew install ccache`)
-
 ```shell
 git clone https://github.com/ridge-ai/duckdb-wasm.git
 cd duckdb-wasm

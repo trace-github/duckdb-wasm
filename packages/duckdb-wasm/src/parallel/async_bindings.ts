@@ -17,6 +17,7 @@ import { DuckDBConfig } from '../bindings/config';
 import { InstantiationProgress } from '../bindings/progress';
 import { WebFile } from '../bindings/web_file';
 import { DuckDBDataProtocol } from '../bindings';
+import { searchOPFSFiles, isOPFSProtocol } from "../utils/opfs_util";
 import { ProgressEntry } from '../log';
 
 const TEXT_ENCODER = new TextEncoder();
@@ -48,6 +49,8 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
     protected _nextMessageId = 0;
     /** The pending requests */
     protected _pendingRequests: Map<number, WorkerTaskVariant> = new Map();
+    /** The DuckDBConfig */
+    protected _config: DuckDBConfig = {};
 
     constructor(logger: Logger, worker: Worker | null = null) {
         this._logger = logger;
@@ -60,6 +63,11 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
     /** Get the logger */
     public get logger(): Logger {
         return this._logger;
+    }
+
+    /** Get the logger */
+    public get config(): DuckDBConfig {
+        return this._config;
     }
 
     /** Attach to worker */
@@ -103,7 +111,7 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
         transfer: ArrayBuffer[] = [],
     ): Promise<WorkerTaskReturnType<W>> {
         if (!this._worker) {
-            console.error('cannot send a message since the worker is not set!');
+            console.error('cannot send a message since the worker is not set!:' + task.type+"," + task.data);
             return undefined as any;
         }
         const mid = this._nextMessageId++;
@@ -309,6 +317,11 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
         this._pendingRequests.clear();
     }
 
+    /** Is in detached state, no worker defined */
+    public isDetached(): boolean {
+        return !this._worker;
+    }
+
     /** Reset the duckdb */
     public async reset(): Promise<null> {
         const task = new WorkerTask<WorkerRequestType.RESET, null, null>(WorkerRequestType.RESET, null);
@@ -326,8 +339,8 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
         return await this.postTask(task);
     }
     /** Try to drop files */
-    public async dropFiles(): Promise<null> {
-        const task = new WorkerTask<WorkerRequestType.DROP_FILES, null, null>(WorkerRequestType.DROP_FILES, null);
+    public async dropFiles(names?: string[]): Promise<null> {
+        const task = new WorkerTask<WorkerRequestType.DROP_FILES, string[] | undefined, null>(WorkerRequestType.DROP_FILES, names);
         return await this.postTask(task);
     }
     /** Flush all files */
@@ -369,6 +382,7 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
 
     /** Open a new database */
     public async open(config: DuckDBConfig): Promise<void> {
+        this._config = config;
         const task = new WorkerTask<WorkerRequestType.OPEN, DuckDBConfig, null>(WorkerRequestType.OPEN, config);
         await this.postTask(task);
     }
@@ -403,6 +417,21 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
 
     /** Run a query */
     public async runQuery(conn: ConnectionID, text: string): Promise<Uint8Array> {
+        if( this.shouldOPFSFileHandling() ){
+            const files = await this.registerOPFSFileFromSQL(text);
+            try {
+                return await this._runQueryAsync(conn, text);
+            } finally {
+                if( files.length > 0 ){
+                    await this.dropFiles(files);
+                }
+            }
+        } else {
+            return await this._runQueryAsync(conn, text);
+        }
+    }
+
+    private async _runQueryAsync(conn: ConnectionID, text: string): Promise<Uint8Array> {
         const task = new WorkerTask<WorkerRequestType.RUN_QUERY, [ConnectionID, string], Uint8Array>(
             WorkerRequestType.RUN_QUERY,
             [conn, text],
@@ -416,6 +445,25 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
         text: string,
         allowStreamResult: boolean = false,
     ): Promise<Uint8Array | null> {
+        if( this.shouldOPFSFileHandling() ){
+            const files = await this.registerOPFSFileFromSQL(text);
+            try {
+                return await this._startPendingQueryAsync(conn, text, allowStreamResult);
+            } finally {
+                if( files.length > 0 ){
+                    await this.dropFiles(files);
+                }
+            }
+        } else {
+            return await this._startPendingQueryAsync(conn, text, allowStreamResult);
+        }
+    }
+
+    private async _startPendingQueryAsync(
+        conn: ConnectionID,
+        text: string,
+        allowStreamResult: boolean = false,
+    ): Promise<Uint8Array | null> {
         const task = new WorkerTask<
             WorkerRequestType.START_PENDING_QUERY,
             [ConnectionID, string, boolean],
@@ -423,6 +471,7 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
         >(WorkerRequestType.START_PENDING_QUERY, [conn, text, allowStreamResult]);
         return await this.postTask(task);
     }
+
     /** Poll a pending query */
     public async pollPendingQuery(conn: ConnectionID): Promise<Uint8Array | null> {
         const task = new WorkerTask<WorkerRequestType.POLL_PENDING_QUERY, ConnectionID, Uint8Array | null>(
@@ -633,5 +682,27 @@ export class AsyncDuckDB implements AsyncDuckDBBindings {
             [conn, path, options],
         );
         await this.postTask(task);
+    }
+
+    private shouldOPFSFileHandling():boolean {
+        if( isOPFSProtocol(this.config.path ?? "")){
+            return this.config.opfs?.fileHandling == "auto";
+        }
+        return false;
+    }
+
+    private async registerOPFSFileFromSQL(text: string) {
+        const files = searchOPFSFiles(text);
+        const result: string[] = [];
+        for (const file of files) {
+            try {
+                await this.registerOPFSFileName(file);
+                result.push(file);
+            } catch (e) {
+                console.error(e);
+                throw new Error("File Not found:" + file);
+            }
+        }
+        return result;
     }
 }

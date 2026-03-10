@@ -11,6 +11,8 @@
 namespace duckdb {
 namespace web {
 
+extern std::string experimental_s3_tables_global_proxy;
+
 enum WebDBFeature : uint32_t {
     FAST_EXCEPTIONS = 0,
     THREADS = 1,
@@ -71,6 +73,7 @@ struct DuckDBConfigOptions {
 struct FileSystemConfig {
     /// Allow falling back to full HTTP reads if the server does not support range requests
     std::optional<bool> allow_full_http_reads = std::nullopt;
+    /// Force full HTTP reads, suppressing use of range requests
     std::optional<bool> force_full_http_reads = std::nullopt;
     std::optional<bool> reliable_head_requests = std::nullopt;
 };

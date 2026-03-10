@@ -28,9 +28,18 @@ export interface DuckDBFilesystemConfig {
      */
     allowFullHTTPReads?: boolean;
     /**
-     * Force use of full HTTP reads, avoiding range requests.
+     * Force use of full HTTP reads, suppressing range requests.
      */
     forceFullHTTPReads?: boolean;
+}
+
+export interface DuckDBOPFSConfig {
+    /**
+     * Defines how `opfs://` files are handled during SQL execution.
+     * - "auto": Automatically register `opfs://` files and drop them after execution.
+     * - "manual": Files must be manually registered and dropped.
+     */
+    fileHandling?: "auto" | "manual";
 }
 
 export enum DuckDBAccessMode {
@@ -78,4 +87,8 @@ export interface DuckDBConfig {
      * Custom user agent string
      */
     customUserAgent?: string;
+    /**
+     * opfs string
+     */
+    opfs?: DuckDBOPFSConfig;
 }
