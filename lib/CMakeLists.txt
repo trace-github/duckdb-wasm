@@ -269,9 +269,24 @@ else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DDUCKDB_JSON_EXTENSION")
   endif()
 
-  target_link_libraries(duckdb_web duckdb duckdb_web_parquet ${DUCKDB_WEB_JSON} arrow rapidjson ${THREAD_LIBS})
+  add_library(
+    duckdb_web_icu
+    ${CMAKE_SOURCE_DIR}/src/extensions/icu_extension.cc)
+
+  add_library(
+    duckdb_web_tpcds
+    ${CMAKE_SOURCE_DIR}/src/extensions/tpcds_extension.cc)
+
+  add_library(
+    duckdb_web_tpch
+    ${CMAKE_SOURCE_DIR}/src/extensions/tpch_extension.cc)
+
+  target_link_libraries(duckdb_web duckdb duckdb_web_parquet ${DUCKDB_WEB_JSON} duckdb_web_icu duckdb_web_tpcds duckdb_web_tpch arrow rapidjson ${THREAD_LIBS})
   target_link_libraries(duckdb_web_parquet duckdb duckdb_parquet)
   target_link_libraries(duckdb_web_json duckdb duckdb_json)
+  target_link_libraries(duckdb_web_icu duckdb duckdb_icu)
+  target_link_libraries(duckdb_web_tpcds duckdb duckdb_tpcds)
+  target_link_libraries(duckdb_web_tpch duckdb duckdb_tpch)
 endif()
 
 # ---------------------------------------------------------------------------
