@@ -1,6 +1,6 @@
-import { StatusCode } from '../status';
-import { WorkerResponseType } from '../parallel/worker_request';
-import { addS3Headers, getHTTPUrl } from '../utils';
+import {StatusCode} from '../status';
+import {WorkerResponseType} from '../parallel/worker_request';
+import {addS3Headers, getHTTPUrl} from '../utils';
 
 import {
     callSRet,
@@ -11,10 +11,10 @@ import {
     DuckDBRuntime,
     failWith,
     FileFlags,
-    readString,
     PreparedDBFileHandle,
+    readString,
 } from './runtime';
-import { DuckDBModule } from './duckdb_module';
+import {DuckDBModule} from './duckdb_module';
 import * as udf from './udf_runtime';
 
 const OPFS_PREFIX_LEN = 'opfs://'.length;
@@ -303,10 +303,10 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                             xhr.responseType = 'arraybuffer';
                             xhr.setRequestHeader('Range', `bytes=0-0`);
                             xhr.send(null);
-                            let actualContentLength = null;
-                            try { actualContentLength = xhr.getResponseHeader('Content-Length'); } catch (e: any) {console.warn(`Failed to get Content-Length on request`);}
-                            const contentRange = actualContentLength?.split('/')[1];
-                            const contentLength2 = actualContentLength;
+                            let contentRange: string | null | undefined = null;
+                            try { contentRange = xhr.getResponseHeader('Content-Range')?.split('/')[1]; } catch (e: any) {console.warn(`Failed to get Content-Range on request`);}
+                            let contentLength2: string | null = null;
+                            try { contentLength2 = xhr.getResponseHeader('Content-Length'); } catch (e: any) {console.warn(`Failed to get Content-Length on request`);}
 
                             let presumedLength = null;
                             if (contentRange !== undefined) {
