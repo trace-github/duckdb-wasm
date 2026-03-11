@@ -419,13 +419,20 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                 case DuckDBDataProtocol.BROWSER_FSACCESS: {
                     const handle: FileSystemSyncAccessHandle = BROWSER_RUNTIME._files?.get(file.fileName);
                     if (!handle) {
+                        if (flags & FileFlags.FILE_FLAGS_NULL_IF_NOT_EXISTS) {
+                            return 0;
+                        }
                         throw new Error(`No OPFS access handle registered with name: ${file.fileName}`);
                     }
                     if (flags & FileFlags.FILE_FLAGS_FILE_CREATE_NEW) {
                         handle.truncate(0);
                     }
-                    const result = mod._malloc(3 * 8);
                     const fileSize = handle.getSize();
+                    // Empty file with NULL_IF_NOT_EXISTS means "file doesn't exist yet"
+                    if (fileSize === 0 && (flags & FileFlags.FILE_FLAGS_NULL_IF_NOT_EXISTS)) {
+                        return 0;
+                    }
+                    const result = mod._malloc(3 * 8);
                     mod.HEAPF64[(result >> 3) + 0] = fileSize;
                     mod.HEAPF64[(result >> 3) + 1] = 0;
                     mod.HEAPF64[(result >> 3) + 2] = 0;
@@ -516,6 +523,12 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                 }
                 xhr.send(null);
                 return xhr.status == 206 || xhr.status == 200;
+            } else if (path.startsWith('opfs://')) {
+                // For OPFS files, check if the handle exists AND has content.
+                // An empty OPFS file (created by prepareFileHandles for a new database)
+                // should not count as "existing" so DuckDB creates a new database.
+                const handle = BROWSER_RUNTIME._files?.get(path) || BROWSER_RUNTIME._preparedHandles?.[path];
+                return handle ? handle.getSize() > 0 : false;
             } else {
                 return BROWSER_RUNTIME._files.has(path);
             }

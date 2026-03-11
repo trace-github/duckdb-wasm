@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html>
+<head><title>DuckDB-WASM COI Test</title></head>
+<body>
+<pre id="output">Starting COI test...</pre>
+<script>
+// Global state
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+</script>
+<script type="module">
+async function run() {
+  const t0 = Date.now();
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    addLog('info', 'SharedArrayBuffer available: ' + (typeof SharedArrayBuffer !== 'undefined'));
+
+    if (!crossOriginIsolated) {
+      throw new Error('CrossOriginIsolated is false - COI bundle requires COOP/COEP headers');
+    }
+
+    addLog('info', 'Importing module...');
+    const mod = await import('/dist/duckdb-wasm.mjs');
+    addLog('info', 'Module loaded (' + Object.keys(mod).length + ' exports)');
+
+    const bundleConfig = {
+      mainModule: '/dist/duckdb-coi.wasm',
+      mainWorker: '/dist/duckdb-browser-coi.worker.js',
+      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    };
+
+    addLog('info', 'Creating COI worker...');
+    const { AsyncDuckDB, ConsoleLogger } = mod;
+
+    // Create worker manually so we can capture errors
+    const worker = new Worker(bundleConfig.mainWorker);
+    worker.onerror = (e) => {
+      addLog('error', 'Main worker error: ' + (e.message || e) + ' at ' + (e.filename || '?') + ':' + (e.lineno || '?'));
+    };
+
+    const logger = new ConsoleLogger();
+    const db = new AsyncDuckDB(logger, worker);
+
+    addLog('info', 'Instantiating COI bundle...');
+    await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+    addLog('info', 'COI bundle instantiated');
+
+    // Open with OPFS persistence and threads
+    const dbName = 'test_' + crypto.randomUUID().replace(/-/g, '') + '.db';
+    addLog('info', 'OPFS database name: ' + dbName);
+
+    // Clean up any stale OPFS files from previous test runs
+    try {
+      const opfsRoot = await navigator.storage.getDirectory();
+      for await (const [name] of opfsRoot.entries()) {
+        if (name.startsWith('test_') && (name.endsWith('.db') || name.endsWith('.db.wal') || name.endsWith('.json') || name.endsWith('.csv'))) {
+          try {
+            await opfsRoot.removeEntry(name);
+            addLog('info', 'Cleaned stale OPFS file: ' + name);
+          } catch (e) {
+            // Sync access handles from terminated workers may still hold locks
+          }
+        }
+      }
+    } catch (cleanErr) {
+      addLog('warn', 'OPFS cleanup: ' + cleanErr.message);
+    }
+
+    // Check OPFS state before open
+    try {
+      const root = await navigator.storage.getDirectory();
+      const entries = [];
+      for await (const [name, handle] of root.entries()) {
+        entries.push(name + ' (' + handle.kind + ')');
+      }
+      addLog('info', 'OPFS entries before open: ' + (entries.length ? entries.join(', ') : 'empty'));
+    } catch (e) {
+      addLog('warn', 'Could not list OPFS: ' + e.message);
+    }
+
+    // First try opening in-memory to verify COI works
+    addLog('info', 'Testing in-memory open first...');
+    await db.open({
+      maximumThreads: 4,
+    });
+    addLog('info', 'In-memory open succeeded, terminating...');
+    await db.terminate();
+
+    // Now try with OPFS
+    addLog('info', 'Creating second COI instance for OPFS...');
+    const worker3 = new Worker(bundleConfig.mainWorker);
+    worker3.onerror = (e) => {
+      addLog('error', 'Worker3 error: ' + (e.message || e));
+    };
+    const db2 = new AsyncDuckDB(logger, worker3);
+    await db2.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+    addLog('info', 'Second instance instantiated');
+
+    await db2.open({
+      path: 'opfs://' + dbName,
+      accessMode: 3, // READ_WRITE
+      maximumThreads: 4,
+    });
+    addLog('info', 'Database opened with OPFS and threads');
+
+    const conn = await db2.connect();
+    addLog('info', 'Connected');
+
+    // Helper to extract text from Arrow IPC buffer
+    function bufText(buf) {
+      return new TextDecoder().decode(new Uint8Array(buf));
+    }
+
+    // Version
+    const v = await conn.query("SELECT version() AS v");
+    const vm = bufText(v).match(/v[\d.]+(-dev\d+)?/);
+    const version = vm ? vm[0] : 'unknown (' + v.byteLength + 'B)';
+    addLog('info', 'Version: ' + version);
+    _results.push({ label: 'version', value: version });
+
+    // Check threads
+    const t = await conn.query("SELECT current_setting('threads')::INTEGER AS t");
+    const tText = bufText(t);
+    addLog('info', 'Threads raw: ' + tText);
+    _results.push({ label: 'threads_raw', value: tText.replace(/[^\x20-\x7E]/g, '') });
+
+    // Simple computation
+    const c = await conn.query("SELECT 42::INTEGER AS answer");
+    addLog('info', 'SELECT 42 OK (' + c.byteLength + 'B)');
+
+    // Generate series (benefits from threads)
+    const s = await conn.query("SELECT count(*)::INTEGER AS n FROM generate_series(1, 100000)");
+    addLog('info', 'generate_series OK (' + s.byteLength + 'B)');
+
+    // Table CRUD
+    await conn.query("CREATE TABLE test_t (id INTEGER, name VARCHAR)");
+    await conn.query("INSERT INTO test_t VALUES (1,'a'),(2,'b'),(3,'c')");
+    const tbl = await conn.query("SELECT count(*)::INTEGER AS n FROM test_t");
+    await conn.query("DROP TABLE test_t");
+    addLog('info', 'Table CRUD OK');
+
+    // CSV file via OPFS: write, register, query, verify
+    const csvData = 'id,name,score\n1,alice,95\n2,bob,87\n3,carol,92\n';
+    const csvFileName = 'test_csv_' + crypto.randomUUID().replace(/-/g, '') + '.csv';
+    const opfsCsvPath = 'opfs://' + csvFileName;
+
+    // Write CSV to OPFS
+    const opfsRoot = await navigator.storage.getDirectory();
+    const csvFileHandle = await opfsRoot.getFileHandle(csvFileName, { create: true });
+    const writable = await csvFileHandle.createWritable();
+    await writable.write(csvData);
+    await writable.close();
+    addLog('info', 'CSV file written to OPFS (' + csvData.length + ' bytes)');
+
+    // Register the OPFS file with DuckDB
+    await db2.registerOPFSFileName(opfsCsvPath);
+    addLog('info', 'OPFS CSV file registered');
+
+    // Query the CSV file (read_csv_auto is built into DuckDB core)
+    const csvResult = await conn.query(
+      "SELECT id::INTEGER AS id, name::VARCHAR AS name, score::INTEGER AS score FROM read_csv_auto('" + opfsCsvPath + "') ORDER BY id"
+    );
+    const csvText = bufText(csvResult);
+
+    // Verify expected values are present
+    const hasAlice = csvText.includes('alice');
+    const hasBob = csvText.includes('bob');
+    const hasCarol = csvText.includes('carol');
+    if (!hasAlice || !hasBob || !hasCarol) {
+      throw new Error('CSV query result missing expected names: alice=' + hasAlice + ' bob=' + hasBob + ' carol=' + hasCarol);
+    }
+    addLog('info', 'CSV OPFS read_csv_auto OK (found alice, bob, carol)');
+
+    // Verify with an aggregate - check binary Arrow IPC for int32 value 274 (0x12010000 LE)
+    const csvSum = await conn.query(
+      "SELECT sum(score)::INTEGER AS total FROM read_csv_auto('" + opfsCsvPath + "')"
+    );
+    const sumBytes = new Uint8Array(csvSum);
+    const sumBuf = sumBytes.buffer.slice(sumBytes.byteOffset, sumBytes.byteOffset + sumBytes.byteLength);
+    const sumView = new DataView(sumBuf);
+    let found274 = false;
+    for (let i = 0; i <= sumBytes.length - 4; i++) {
+      if (sumView.getInt32(i, true) === 274) { found274 = true; break; }
+    }
+    if (!found274) {
+      throw new Error('CSV aggregate expected sum=274 in Arrow IPC buffer (' + csvSum.byteLength + 'B)');
+    }
+    addLog('info', 'CSV OPFS aggregate OK (sum=274)');
+    _results.push({ label: 'csv_opfs', value: 'OK' });
+
+    // Clean up the CSV OPFS file
+    await db2.dropFile(opfsCsvPath);
+    try { await opfsRoot.removeEntry(csvFileName); } catch (e) { /* may be locked */ }
+
+    // Cleanup
+    await conn.close();
+    addLog('info', 'Connection closed');
+    await db2.terminate();
+    addLog('info', 'DB terminated');
+
+    // Clean up OPFS files (db + wal)
+    try {
+      const opfsRoot = await navigator.storage.getDirectory();
+      for (const name of [dbName, dbName + '.wal']) {
+        try {
+          await opfsRoot.removeEntry(name);
+          addLog('info', 'OPFS file cleaned up: ' + name);
+        } catch (e) {
+          // May not exist or may still be locked briefly
+        }
+      }
+    } catch (cleanErr) {
+      addLog('warn', 'Could not clean OPFS files: ' + cleanErr.message);
+    }
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'All COI tests passed in ' + elapsed + 'ms');
+    sendReport('PASS', { elapsed: elapsed, bundle: 'coi' });
+
+  } catch (e) {
+    addLog('error', 'FAILED: ' + e.message);
+    addLog('error', e.stack);
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message, stack: e.stack });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

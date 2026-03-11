@@ -975,6 +975,11 @@ arrow::Status WebDB::Open(std::string_view args_json) {
         db_config.options.duckdb_api = "wasm";
         db_config.options.custom_user_agent = config_->custom_user_agent;
         db_config.options.use_direct_io = config_->use_direct_io;
+        // Skip MagicBytes file-type detection during initialization.
+        // It calls OpenFile which registers the file in WebFileSystem::files_by_name_
+        // before StorageManager::FileExists is called, causing empty OPFS files to
+        // appear as "existing" and triggering "exists but not valid" errors.
+        db_config.options.database_type = "duckdb";
         auto db = make_shared_ptr<duckdb::DuckDB>(config_->path, &db_config);
 #ifndef WASM_LOADABLE_EXTENSIONS
         duckdb_web_parquet_init(db.get());

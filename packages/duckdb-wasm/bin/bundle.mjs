@@ -111,6 +111,10 @@ fs.copyFile(path.resolve(src, 'bindings', 'duckdb-coi.wasm'), path.resolve(dist,
     patchFile('./src/bindings/duckdb-mvp.js', 'crypto');
     patchFile('./src/bindings/duckdb-eh.js', 'crypto');
     patchFile('./src/bindings/duckdb-coi.js', 'crypto');
+    // Patch COI pthread memory: emscripten skips wasmMemory init when ENVIRONMENT_IS_PTHREAD,
+    // but the custom pthread worker sets Module["wasmMemory"] before calling DuckDB(m).
+    // Without this, the local wasmMemory var stays undefined and WebAssembly.Instance fails.
+    patchCoiPthreadMemory('./src/bindings/duckdb-coi.js');
 
     // -------------------------------
     // Browser bundles
@@ -240,58 +244,44 @@ fs.copyFile(path.resolve(src, 'bindings', 'duckdb-coi.wasm'), path.resolve(dist,
     // -------------------------------
     // Node bundles
 
-    // console.log('[ ESBUILD ] duckdb-node.cjs');
-    // await esbuild.build({
-    //     entryPoints: ['./src/targets/duckdb.ts'],
-    //     outfile: 'dist/duckdb-node.cjs',
-    //     platform: 'node',
-    //     format: 'cjs',
-    //     globalName: 'duckdb',
-    //     target: TARGET_NODE,
-    //     bundle: true,
-    //     minify: !is_debug,
-    //     sourcemap: is_debug ? 'inline' : true,
-    //     external: EXTERNALS_NODE,
-    // });
+    console.log('[ ESBUILD ] duckdb-node.mjs');
+    await esbuild.build({
+        entryPoints: ['./src/worker_node.ts'],
+        outfile: 'dist/duckdb-node.mjs',
+        platform: 'node',
+        format: 'esm',
+        target: TARGET_NODE,
+        bundle: true,
+        minify: !is_debug,
+        sourcemap: is_debug ? 'inline' : true,
+        external: ['worker_threads', 'fs'],
+    });
 
-    // console.log('[ ESBUILD ] duckdb-node-blocking.cjs');
-    // await esbuild.build({
-    //     entryPoints: ['./src/targets/duckdb-node-blocking.ts'],
-    //     outfile: 'dist/duckdb-node-blocking.cjs',
-    //     platform: 'node',
-    //     format: 'cjs',
-    //     target: TARGET_NODE,
-    //     bundle: true,
-    //     minify: !is_debug,
-    //     sourcemap: is_debug ? 'inline' : true,
-    //     external: EXTERNALS_NODE,
-    // });
+    console.log('[ ESBUILD ] duckdb-node-mvp.worker.cjs');
+    await esbuild.build({
+        entryPoints: ['./src/targets/duckdb-node-mvp.worker.ts'],
+        outfile: 'dist/duckdb-node-mvp.worker.cjs',
+        platform: 'node',
+        format: 'cjs',
+        target: TARGET_NODE,
+        bundle: true,
+        minify: !is_debug,
+        sourcemap: is_debug ? 'inline' : true,
+        external: EXTERNALS_NODE,
+    });
 
-    // console.log('[ ESBUILD ] duckdb-node-mvp.worker.cjs');
-    // await esbuild.build({
-    //     entryPoints: ['./src/targets/duckdb-node-mvp.worker.ts'],
-    //     outfile: 'dist/duckdb-node-mvp.worker.cjs',
-    //     platform: 'node',
-    //     format: 'cjs',
-    //     target: TARGET_NODE,
-    //     bundle: true,
-    //     minify: !is_debug,
-    //     sourcemap: is_debug ? 'inline' : true,
-    //     external: EXTERNALS_NODE,
-    // });
-
-    // console.log('[ ESBUILD ] duckdb-node-eh.worker.cjs');
-    // await esbuild.build({
-    //     entryPoints: ['./src/targets/duckdb-node-eh.worker.ts'],
-    //     outfile: 'dist/duckdb-node-eh.worker.cjs',
-    //     platform: 'node',
-    //     format: 'cjs',
-    //     target: TARGET_NODE,
-    //     bundle: true,
-    //     minify: !is_debug,
-    //     sourcemap: is_debug ? 'inline' : true,
-    //     external: EXTERNALS_NODE,
-    // });
+    console.log('[ ESBUILD ] duckdb-node-eh.worker.cjs');
+    await esbuild.build({
+        entryPoints: ['./src/targets/duckdb-node-eh.worker.ts'],
+        outfile: 'dist/duckdb-node-eh.worker.cjs',
+        platform: 'node',
+        format: 'cjs',
+        target: TARGET_NODE,
+        bundle: true,
+        minify: !is_debug,
+        sourcemap: is_debug ? 'inline' : true,
+        external: EXTERNALS_NODE,
+    });
 
     // -------------------------------
     // Test bundles
@@ -329,24 +319,16 @@ fs.copyFile(path.resolve(src, 'bindings', 'duckdb-coi.wasm'), path.resolve(dist,
     // Browser declarations
     await writeFile(
         path.join(dist, 'duckdb-browser.d.ts'),
-        "export * from './types/src/targets/duckdb';",
+        "export * from './types/targets/duckdb';",
         printErr,
     );
-    // await fs.promises.writeFile(
-    //     path.join(dist, 'duckdb-browser-blocking.d.ts'),
-    //     "export * from './types/src/targets/duckdb-browser-blocking';",
-    // );
 
-    // // Node declarations
-    // await fs.promises.writeFile(
-    //     path.join(dist, 'duckdb-node.d.ts'),
-    //     "export * from './types/src/targets/duckdb';",
-    //     printErr,
-    // );
-    // await fs.promises.writeFile(
-    //     path.join(dist, 'duckdb-node-blocking.d.ts'),
-    //     "export * from './types/src/targets/duckdb-node-blocking';",
-    // );
+    // Node declarations
+    await writeFile(
+        path.join(dist, 'duckdb-node.d.ts'),
+        "export { createWorker } from './types/worker_node';",
+        printErr,
+    );
 
     // -------------------------------
     // Patch sourcemaps
@@ -373,4 +355,22 @@ function patchFile(fileName, moduleName) {
     // - we have to escape the middle quote
     const sedCommand = `s/require(["'\\'']${moduleName}["'\\''])/["${moduleName}"].map(require)/g`;
     execSync(`sed -i.bak '${sedCommand}' ${fileName} && rm ${fileName}.bak`);
+}
+
+function patchCoiPthreadMemory(fileName) {
+    // Emscripten wraps wasmMemory init in if(!ENVIRONMENT_IS_PTHREAD), but the bundled
+    // pthread worker sets Module["wasmMemory"] before calling DuckDB(m). We insert a
+    // line to pick up Module["wasmMemory"] even in the pthread case.
+    const content = fs.readFileSync(fileName, 'utf8');
+    const needle = 'if (!ENVIRONMENT_IS_PTHREAD) {\n                if (Module["wasmMemory"]) {\n                    wasmMemory = Module["wasmMemory"]';
+    if (!content.includes(needle)) {
+        // Already patched or format changed
+        console.warn('WARN: Could not find COI pthread memory pattern to patch');
+        return;
+    }
+    const patched = content.replace(
+        needle,
+        'if (ENVIRONMENT_IS_PTHREAD && Module["wasmMemory"]) {\n                wasmMemory = Module["wasmMemory"]\n            }\n            if (!ENVIRONMENT_IS_PTHREAD) {\n                if (Module["wasmMemory"]) {\n                    wasmMemory = Module["wasmMemory"]'
+    );
+    fs.writeFileSync(fileName, patched);
 }

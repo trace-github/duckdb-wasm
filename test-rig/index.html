@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html>
+<head><title>DuckDB-WASM Test Rig</title></head>
+<body>
+<pre id="output">Starting test rig...</pre>
+<script>
+// Global state
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false); // synchronous
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+// Global error handlers as backstop (only fires if run() didn't catch)
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+</script>
+<script type="module">
+async function tryBundle(mod, bundleConfig, label) {
+  addLog('info', 'Trying ' + label + ' bundle...');
+  const { duckdb, ConsoleLogger } = mod;
+  const db = await duckdb(bundleConfig, new ConsoleLogger());
+  addLog('info', label + ' instantiated');
+
+  await db.open({
+    maximumThreads: (label === 'coi' && crossOriginIsolated) ? 4 : undefined,
+  });
+  addLog('info', 'Database opened');
+
+  const conn = await db.connect();
+  addLog('info', 'Connected');
+  return { db, conn, bundle: label };
+}
+
+async function run() {
+  const t0 = Date.now();
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+
+    addLog('info', 'Importing module...');
+    const mod = await import('/dist/duckdb-wasm.mjs');
+    addLog('info', 'Module loaded (' + Object.keys(mod).length + ' exports)');
+
+    // Try bundles in order: eh first (most compatible), then coi, then mvp
+    const bundles = [
+      {
+        label: 'eh',
+        config: {
+          mainModule: '/dist/duckdb-eh.wasm',
+          mainWorker: '/dist/duckdb-browser-eh.worker.js',
+        }
+      },
+      {
+        label: 'coi',
+        config: {
+          mainModule: '/dist/duckdb-coi.wasm',
+          mainWorker: '/dist/duckdb-browser-coi.worker.js',
+          pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+        }
+      },
+      {
+        label: 'mvp',
+        config: {
+          mainModule: '/dist/duckdb-mvp.wasm',
+          mainWorker: '/dist/duckdb-browser-mvp.worker.js',
+        }
+      },
+    ];
+
+    let conn, bundleName;
+    for (const b of bundles) {
+      try {
+        const result = await tryBundle(mod, b.config, b.label);
+        conn = result.conn;
+        bundleName = result.bundle;
+        break;
+      } catch (e) {
+        addLog('warn', b.label + ' failed: ' + e.message);
+      }
+    }
+
+    if (!conn) {
+      throw new Error('All bundles failed to instantiate');
+    }
+
+    _results.push({ label: 'bundle', value: bundleName });
+
+    // Helper to extract text from Arrow IPC buffer
+    function bufText(buf) {
+      return new TextDecoder().decode(new Uint8Array(buf));
+    }
+
+    addLog('info', 'Running test queries...');
+
+    // Version
+    const v = await conn.query("SELECT version() AS v");
+    const vm = bufText(v).match(/v[\d.]+(-dev\d+)?/);
+    const version = vm ? vm[0] : 'unknown (' + v.byteLength + 'B)';
+    addLog('info', 'Version: ' + version);
+    _results.push({ label: 'version', value: version });
+
+    // Threads
+    const t = await conn.query("SELECT current_setting('threads')::INTEGER AS t");
+    addLog('info', 'Threads query OK (' + t.byteLength + 'B)');
+
+    // Computation
+    const c = await conn.query("SELECT 42::INTEGER AS answer");
+    addLog('info', 'SELECT 42 OK (' + c.byteLength + 'B)');
+
+    // Generate series
+    const s = await conn.query("SELECT count(*)::INTEGER AS n FROM generate_series(1, 10000)");
+    addLog('info', 'generate_series OK (' + s.byteLength + 'B)');
+
+    // Extensions (set home_directory first to avoid IO error)
+    try {
+      await conn.query("SET home_directory='/tmp'");
+      const e = await conn.query("SELECT extension_name FROM duckdb_extensions() WHERE loaded = true");
+      const eText = bufText(e);
+      const knownExts = ['json', 'parquet', 'icu', 'tpcds', 'tpch'];
+      const foundExts = knownExts.filter(x => eText.includes(x));
+      addLog('info', 'Extensions: ' + (foundExts.join(', ') || 'none'));
+      _results.push({ label: 'extensions', value: foundExts.join(', ') || 'none' });
+    } catch (extErr) {
+      addLog('warn', 'Extensions query failed: ' + extErr.message);
+      _results.push({ label: 'extensions', value: 'query failed' });
+    }
+
+    // Table CRUD
+    await conn.query("CREATE TABLE test_t (id INTEGER, name VARCHAR)");
+    await conn.query("INSERT INTO test_t VALUES (1,'a'),(2,'b'),(3,'c')");
+    const tbl = await conn.query("SELECT count(*)::INTEGER AS n FROM test_t");
+    await conn.query("DROP TABLE test_t");
+    addLog('info', 'Table CRUD OK');
+
+    // JSON extension
+    try {
+      const j = await conn.query("SELECT json_extract('{\"x\":99}','$.x')::INTEGER AS val");
+      addLog('info', 'JSON extension OK');
+      _results.push({ label: 'json_ext', value: 'OK' });
+    } catch (jsonErr) {
+      addLog('warn', 'JSON extension not available: ' + jsonErr.message.split('\n')[0]);
+      _results.push({ label: 'json_ext', value: 'NOT LOADED' });
+    }
+
+    // Parquet extension
+    try {
+      await conn.query("SELECT * FROM parquet_schema('nonexistent.parquet')");
+    } catch (pqErr) {
+      // We expect a file-not-found error, NOT a "function not found" error
+      const msg = pqErr.message;
+      if (msg.includes('parquet extension')) {
+        addLog('warn', 'Parquet extension not available');
+        _results.push({ label: 'parquet_ext', value: 'NOT LOADED' });
+      } else {
+        addLog('info', 'Parquet extension OK (got expected file error)');
+        _results.push({ label: 'parquet_ext', value: 'OK' });
+      }
+    }
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'All tests passed in ' + elapsed + 'ms');
+    sendReport('PASS', { elapsed: elapsed, bundle: bundleName });
+
+  } catch (e) {
+    addLog('error', 'FAILED: ' + e.message);
+    addLog('error', e.stack);
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message, stack: e.stack });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

@@ -22,7 +22,8 @@ export class DuckDB extends DuckDBBrowserBindings {
             ...moduleOverrides,
             instantiateWasm: this.instantiateWasm.bind(this),
             locateFile: this.locateFile.bind(this),
-        });
+            mainScriptUrlOrBlob: this.pthreadWorkerURL ?? undefined,
+        } as Partial<DuckDBModule>);
     }
 }
 

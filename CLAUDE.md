@@ -102,6 +102,27 @@ Do NOT run `npm run build` from the repo root — it triggers `make build_wasm_a
 
 The `.d.ts` path in `bin/bundle.mjs` must match the actual tsc output structure. TypeScript outputs to `dist/types/` with the `src/` prefix stripped (e.g., `dist/types/targets/duckdb.d.ts`, not `dist/types/src/targets/duckdb.d.ts`).
 
+### Browser Test Rig
+
+A browser test rig is available at `test-rig/` for verifying the built JS/WASM package end-to-end in a real browser with Cross-Origin Isolation.
+
+**Run it:**
+```
+./test-rig/run.sh
+```
+
+This starts a local server (port 9876) with COOP/COEP headers, opens a browser, loads the built `dist/` package, runs diagnostic queries, and reports results back to stdout. Exit code 0 = PASS, 1 = FAIL, 2 = timeout.
+
+**Options:**
+- `--keep-alive` — Keep server running after report (for iterating in the browser)
+- `--no-open` — Don't auto-open browser
+- `--port PORT` — Custom port (default 9876)
+- `--timeout MS` — Custom timeout (default 60s)
+
+**What it tests:** Module loading, bundle selection (tries EH → COI → MVP), database open/connect, version query, computation, generate_series, table CRUD, and extension availability (json, parquet).
+
+**Use this after JS/TS changes** to verify the built package works in a browser. The server prints all logs, errors, and query results to the terminal so you can act on failures without needing to open browser DevTools.
+
 ### Debugging Build Failures
 
 1. **`wasm-opt` unknown option errors** — Binaryen version mismatch. The Dockerfile installs binaryen v126 to fix this.

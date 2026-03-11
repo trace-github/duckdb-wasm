@@ -1,26 +1,14 @@
 {
-    "name": "@ridge-ai/duckdb-wasm",
+    "name": "trace-duckdb-wasm",
     "version": "0.0.1",
     "description": "DuckDB-WASM, customized.",
     "license": "MIT",
     "repository": {
-        "type": "git",
-        "url": "https://github.com/ridge-ai/duckdb-wasm.git"
+        "type": "git"
     },
     "keywords": [
-        "sql",
-        "duckdb",
-        "relational",
-        "database",
-        "data",
-        "query",
         "wasm",
-        "analytics",
-        "olap",
-        "arrow",
-        "parquet",
-        "json",
-        "csv"
+        "duckdb"
     ],
     "devDependencies": {
         "@types/emscripten": "^1.40.1",
@@ -77,6 +65,9 @@
         "./dist/duckdb-browser-coi.worker.js": "./dist/duckdb-browser-coi.worker.js",
         "./dist/duckdb-browser-eh.worker.js": "./dist/duckdb-browser-eh.worker.js",
         "./dist/duckdb-browser-mvp.worker.js": "./dist/duckdb-browser-mvp.worker.js",
+        "./dist/duckdb-node-mvp.worker.cjs": "./dist/duckdb-node-mvp.worker.cjs",
+        "./dist/duckdb-node-eh.worker.cjs": "./dist/duckdb-node-eh.worker.cjs",
+        "./dist/duckdb-node.mjs": "./dist/duckdb-node.mjs",
         ".": {
             "browser": {
                 "types": "./dist/duckdb-browser.d.ts",
@@ -86,6 +77,10 @@
             "types": "./dist/duckdb-browser.d.ts",
             "import": "./dist/duckdb-wasm.mjs",
             "require": "./dist/duckdb-wasm.umd.js"
+        },
+        "./node": {
+            "types": "./dist/duckdb-node.d.ts",
+            "import": "./dist/duckdb-node.mjs"
         }
     }
 }
