@@ -1,0 +1,20 @@
+[package]
+name = "duckdb_evalexpr_rhai_rust"
+version = "2025.1204.1"
+edition = "2021"
+publish = false
+
+[lib]
+name = "duckdb_evalexpr_rhai_rust"
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[profile.release]
+panic = "abort"
+lto = true
+
+[dependencies]
+rhai = { version = "1.20.1", features = ["serde"] }
+rhai-url = "0.0.5"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"

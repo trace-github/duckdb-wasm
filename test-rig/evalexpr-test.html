@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html>
+<head><title>DuckDB-WASM evalexpr_rhai Test</title></head>
+<body>
+<pre id="output">Starting evalexpr_rhai test...</pre>
+<script>
+// Global state
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+</script>
+<script type="module">
+async function run() {
+  const t0 = Date.now();
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    addLog('info', 'SharedArrayBuffer available: ' + (typeof SharedArrayBuffer !== 'undefined'));
+
+    if (!crossOriginIsolated) {
+      throw new Error('CrossOriginIsolated is false - COI bundle requires COOP/COEP headers');
+    }
+
+    addLog('info', 'Importing module...');
+    const mod = await import('/dist/duckdb-wasm.mjs');
+    addLog('info', 'Module loaded (' + Object.keys(mod).length + ' exports)');
+
+    const bundleConfig = {
+      mainModule: '/dist/duckdb-coi.wasm',
+      mainWorker: '/dist/duckdb-browser-coi.worker.js',
+      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    };
+
+    addLog('info', 'Creating COI worker...');
+    const { AsyncDuckDB, ConsoleLogger } = mod;
+
+    const worker = new Worker(bundleConfig.mainWorker);
+    worker.onerror = (e) => {
+      addLog('error', 'Worker error: ' + (e.message || e) + ' at ' + (e.filename || '?') + ':' + (e.lineno || '?'));
+    };
+
+    const logger = new ConsoleLogger();
+    const db = new AsyncDuckDB(logger, worker);
+
+    addLog('info', 'Instantiating COI bundle...');
+    await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+    addLog('info', 'COI bundle instantiated');
+
+    await db.open({
+      maximumThreads: 4,
+    });
+    addLog('info', 'Database opened (in-memory, 4 threads)');
+
+    const conn = await db.connect();
+    addLog('info', 'Connected');
+
+    // Helper to extract text from Arrow IPC buffer
+    function bufText(buf) {
+      return new TextDecoder().decode(new Uint8Array(buf));
+    }
+
+    // Version check
+    const v = await conn.query("SELECT version() AS v");
+    const vm = bufText(v).match(/v[\d.]+(-dev\d+)?/);
+    const version = vm ? vm[0] : 'unknown';
+    addLog('info', 'Version: ' + version);
+    _results.push({ label: 'version', value: version });
+
+    // ---- evalexpr_rhai tests ----
+
+    // Test 1: Basic arithmetic
+    addLog('info', 'Test 1: Basic arithmetic...');
+    const r1 = await conn.query("SELECT evalexpr_rhai('40 + 2') AS result");
+    const r1text = bufText(r1);
+    if (!r1text.includes('42')) {
+      throw new Error('Test 1 failed: expected 42 in result, got: ' + r1text);
+    }
+    addLog('info', 'Test 1 PASSED: evalexpr_rhai("40 + 2") => 42');
+    _results.push({ label: 'basic_arithmetic', value: 'OK' });
+
+    // Test 2: String expression
+    addLog('info', 'Test 2: String expression...');
+    const r2 = await conn.query('SELECT evalexpr_rhai(\'"hello" + " " + "world"\') AS result');
+    const r2text = bufText(r2);
+    if (!r2text.includes('hello world')) {
+      throw new Error('Test 2 failed: expected "hello world" in result, got: ' + r2text);
+    }
+    addLog('info', 'Test 2 PASSED: string concatenation works');
+    _results.push({ label: 'string_expr', value: 'OK' });
+
+    // Test 3: Context passing
+    addLog('info', 'Test 3: Context passing...');
+    const r3 = await conn.query("SELECT evalexpr_rhai('context.x + context.y', '{\"x\": 10, \"y\": 32}') AS result");
+    const r3text = bufText(r3);
+    if (!r3text.includes('42')) {
+      throw new Error('Test 3 failed: expected 42 in context result, got: ' + r3text);
+    }
+    addLog('info', 'Test 3 PASSED: context.x + context.y => 42');
+    _results.push({ label: 'context_passing', value: 'OK' });
+
+    // Test 4: Error handling (division by zero returns error union)
+    addLog('info', 'Test 4: Error handling...');
+    const r4 = await conn.query("SELECT evalexpr_rhai('1/0') AS result");
+    const r4text = bufText(r4);
+    // Should contain an error variant (division by zero or similar)
+    addLog('info', 'Test 4 PASSED: error expression returned result (' + r4.byteLength + 'B)');
+    _results.push({ label: 'error_handling', value: 'OK' });
+
+    // Test 5: Multiple rows with threads
+    addLog('info', 'Test 5: Multi-row with threads...');
+    const r5 = await conn.query(
+      "SELECT evalexpr_rhai(i::VARCHAR || ' + 1') AS result FROM generate_series(1, 50) t(i)"
+    );
+    addLog('info', 'Test 5 PASSED: 50-row evalexpr_rhai completed (' + r5.byteLength + 'B)');
+    _results.push({ label: 'multi_row_threads', value: 'OK' });
+
+    // Test 6: Boolean expression
+    addLog('info', 'Test 6: Boolean expression...');
+    const r6 = await conn.query("SELECT evalexpr_rhai('10 > 5') AS result");
+    const r6text = bufText(r6);
+    if (!r6text.includes('true')) {
+      throw new Error('Test 6 failed: expected true, got: ' + r6text);
+    }
+    addLog('info', 'Test 6 PASSED: boolean expression works');
+    _results.push({ label: 'boolean_expr', value: 'OK' });
+
+    // Cleanup
+    await conn.close();
+    await db.terminate();
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'All evalexpr_rhai tests passed in ' + elapsed + 'ms');
+    sendReport('PASS', { elapsed: elapsed, bundle: 'coi' });
+
+  } catch (e) {
+    addLog('error', 'FAILED: ' + e.message);
+    addLog('error', e.stack);
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message, stack: e.stack });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

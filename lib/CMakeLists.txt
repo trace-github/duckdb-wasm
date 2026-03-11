@@ -181,6 +181,7 @@ include("${CMAKE_SOURCE_DIR}/cmake/benchmark.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/gflags.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/googletest.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/rapidjson.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/evalexpr_rhai.cmake")
 
 # ---------------------------------------------------------------------------
 # Code coverage
@@ -274,12 +275,21 @@ else()
     duckdb_web_tpch
     ${CMAKE_SOURCE_DIR}/src/extensions/tpch_extension.cc)
 
-  target_link_libraries(duckdb_web duckdb duckdb_web_parquet duckdb_web_json duckdb_web_icu duckdb_web_tpcds duckdb_web_tpch arrow rapidjson ${THREAD_LIBS})
+  add_library(
+    duckdb_web_evalexpr_rhai
+    ${CMAKE_SOURCE_DIR}/src/extensions/evalexpr_rhai_extension.cc
+    ${CMAKE_SOURCE_DIR}/../submodules/evalexpr_rhai/src/evalexpr_rhai_extension.cpp)
+
+  target_include_directories(duckdb_web_evalexpr_rhai PRIVATE
+    ${CMAKE_SOURCE_DIR}/../submodules/evalexpr_rhai/src/include)
+
+  target_link_libraries(duckdb_web duckdb duckdb_web_parquet duckdb_web_json duckdb_web_icu duckdb_web_tpcds duckdb_web_tpch duckdb_web_evalexpr_rhai arrow rapidjson ${THREAD_LIBS})
   target_link_libraries(duckdb_web_parquet duckdb duckdb_parquet)
   target_link_libraries(duckdb_web_json duckdb duckdb_json)
   target_link_libraries(duckdb_web_icu duckdb duckdb_icu)
   target_link_libraries(duckdb_web_tpcds duckdb duckdb_tpcds)
   target_link_libraries(duckdb_web_tpch duckdb duckdb_tpch)
+  target_link_libraries(duckdb_web_evalexpr_rhai duckdb evalexpr_rhai_rust)
 endif()
 
 # ---------------------------------------------------------------------------

@@ -56,6 +56,7 @@
 #include "duckdb/web/extensions/parquet_extension.h"
 #include "duckdb/web/extensions/tpcds_extension.h"
 #include "duckdb/web/extensions/tpch_extension.h"
+#include "duckdb/web/extensions/evalexpr_rhai_extension.h"
 #include "duckdb/web/functions/table_function_relation.h"
 #include "duckdb/web/http_wasm.h"
 #include "duckdb/web/io/arrow_ifstream.h"
@@ -987,6 +988,7 @@ arrow::Status WebDB::Open(std::string_view args_json) {
         duckdb_web_icu_init(db.get());
         duckdb_web_tpcds_init(db.get());
         duckdb_web_tpch_init(db.get());
+        duckdb_web_evalexpr_rhai_init(db.get());
 #endif  // WASM_LOADABLE_EXTENSIONS
         RegisterCustomExtensionOptions(db);
 

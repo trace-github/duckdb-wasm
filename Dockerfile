@@ -33,9 +33,20 @@ RUN git clone https://github.com/emscripten-core/emsdk.git $EMSDK \
 ENV PATH="$EMSDK:$EMSDK/upstream/emscripten:$PATH"
 ENV EM_CONFIG="$EMSDK/.emscripten"
 
+# Install Rust nightly for evalexpr_rhai (wasm32-unknown-emscripten is tier 3)
+ENV RUSTUP_HOME=/opt/rustup
+ENV CARGO_HOME=/opt/cargo
+ENV PATH="$CARGO_HOME/bin:$PATH"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+    -y --default-toolchain nightly --profile minimal \
+    && rustup target add wasm32-unknown-emscripten --toolchain nightly \
+    && rustup component add rust-src --toolchain nightly
+
 # Configure ccache to use the mounted cache volume
 ENV CCACHE_DIR=/cache/ccache
 ENV CCACHE_MAXSIZE=5G
+# Persist Cargo build artifacts across Docker runs
+ENV CARGO_TARGET_DIR=/cache/cargo-target
 
 WORKDIR /src
 
