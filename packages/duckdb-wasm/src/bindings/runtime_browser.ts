@@ -122,6 +122,13 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                         fromCached: true,
                     };
                 }
+                if (BROWSER_RUNTIME._preparedHandles[path]) {
+                    return {
+                        path,
+                        handle: BROWSER_RUNTIME._preparedHandles[path],
+                        fromCached: true,
+                    };
+                }
                 const opfsRoot = BROWSER_RUNTIME._opfsRoot!;
                 let dirHandle: FileSystemDirectoryHandle = opfsRoot;
                 // check if mkdir -p is needed
@@ -143,7 +150,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                 }
                 const fileHandle = await dirHandle.getFileHandle(fileName, { create: false }).catch(e => {
                     if (e?.name === 'NotFoundError') {
-                        console.debug(`File ${path} does not exists yet, creating...`);
+                        console.debug(`File ${path} does not exists yet, creating..`);
                         return dirHandle.getFileHandle(fileName, { create: true });
                     }
                     throw e;

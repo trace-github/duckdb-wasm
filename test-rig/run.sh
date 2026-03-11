@@ -8,11 +8,13 @@ PORT="${TEST_RIG_PORT:-9876}"
 TIMEOUT="${TEST_RIG_TIMEOUT:-60000}"
 KEEP_ALIVE=""
 OPEN_BROWSER=1
+PAGE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --keep-alive) KEEP_ALIVE=1; shift;;
     --no-open) OPEN_BROWSER=0; shift;;
+    --coi) PAGE="/coi-test.html"; shift;;
     --port) PORT="$2"; shift 2;;
     --timeout) TIMEOUT="$2"; shift 2;;
     *) echo "Unknown option: $1"; exit 1;;
@@ -43,13 +45,13 @@ for i in $(seq 1 20); do
 done
 
 if [[ "$OPEN_BROWSER" == "1" ]]; then
-  echo "Opening browser at http://localhost:$PORT/"
+  echo "Opening browser at http://localhost:$PORT$PAGE"
   if command -v open &>/dev/null; then
-    open "http://localhost:$PORT/"
+    open "http://localhost:$PORT$PAGE"
   elif command -v xdg-open &>/dev/null; then
-    xdg-open "http://localhost:$PORT/"
+    xdg-open "http://localhost:$PORT$PAGE"
   else
-    echo "Please open http://localhost:$PORT/ in your browser"
+    echo "Please open http://localhost:$PORT$PAGE in your browser"
   fi
 fi
 

@@ -983,9 +983,7 @@ arrow::Status WebDB::Open(std::string_view args_json) {
         auto db = make_shared_ptr<duckdb::DuckDB>(config_->path, &db_config);
 #ifndef WASM_LOADABLE_EXTENSIONS
         duckdb_web_parquet_init(db.get());
-#if defined(DUCKDB_JSON_EXTENSION)
         duckdb_web_json_init(db.get());
-#endif
         duckdb_web_icu_init(db.get());
         duckdb_web_tpcds_init(db.get());
         duckdb_web_tpch_init(db.get());

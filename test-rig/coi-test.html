@@ -172,6 +172,33 @@ async function run() {
     await conn.query("DROP TABLE test_t");
     addLog('info', 'Table CRUD OK');
 
+    // JSON extension — test json_extract and json type
+    try {
+      const j = await conn.query("SELECT json_extract('{\"x\":99}','$.x')::INTEGER AS val");
+      addLog('info', 'JSON json_extract OK');
+    } catch (jsonErr) {
+      throw new Error('JSON extension json_extract failed: ' + jsonErr.message);
+    }
+    try {
+      const jt = await conn.query("SELECT '{\"a\":1}'::JSON AS j");
+      addLog('info', 'JSON type cast OK');
+      _results.push({ label: 'json_ext', value: 'OK' });
+    } catch (jsonErr) {
+      throw new Error('JSON type cast failed: ' + jsonErr.message);
+    }
+
+    // Parquet extension
+    try {
+      await conn.query("SELECT * FROM parquet_schema('nonexistent.parquet')");
+    } catch (pqErr) {
+      const msg = pqErr.message;
+      if (msg.includes('parquet extension') || msg.includes('Scalar Function')) {
+        throw new Error('Parquet extension not loaded: ' + msg);
+      }
+      addLog('info', 'Parquet extension OK (got expected file error)');
+      _results.push({ label: 'parquet_ext', value: 'OK' });
+    }
+
     // CSV file via OPFS: write, register, query, verify
     const csvData = 'id,name,score\n1,alice,95\n2,bob,87\n3,carol,92\n';
     const csvFileName = 'test_csv_' + crypto.randomUUID().replace(/-/g, '') + '.csv';
@@ -225,18 +252,87 @@ async function run() {
     await db2.dropFile(opfsCsvPath);
     try { await opfsRoot.removeEntry(csvFileName); } catch (e) { /* may be locked */ }
 
-    // Cleanup
+    // Write persistent data before shutdown
+    await conn.query("CREATE TABLE persist_test (id INTEGER, val VARCHAR)");
+    await conn.query("INSERT INTO persist_test VALUES (1,'alpha'),(2,'beta'),(3,'gamma')");
+    const beforeShutdown = await conn.query("SELECT count(*)::INTEGER AS n FROM persist_test");
+    addLog('info', 'Persist table created with 3 rows');
+
+    // Cleanup first session
     await conn.close();
     addLog('info', 'Connection closed');
     await db2.terminate();
     addLog('info', 'DB terminated');
 
+    // Verify OPFS files exist after shutdown
+    const opfsRootCheck = await navigator.storage.getDirectory();
+    const postShutdownEntries = [];
+    for await (const [name, handle] of opfsRootCheck.entries()) {
+      postShutdownEntries.push(name + ' (' + handle.kind + ')');
+    }
+    addLog('info', 'OPFS entries after shutdown: ' + (postShutdownEntries.length ? postShutdownEntries.join(', ') : 'EMPTY'));
+
+    const dbFileExists = postShutdownEntries.some(e => e.startsWith(dbName));
+    if (!dbFileExists) {
+      throw new Error('OPFS persistence FAILED: database file ' + dbName + ' not found after shutdown');
+    }
+    addLog('info', 'OPFS file verified present after shutdown');
+
+    // Reopen database and verify data persisted
+    addLog('info', 'Reopening database to verify persistence...');
+    const worker4 = new Worker(bundleConfig.mainWorker);
+    worker4.onerror = (e) => {
+      addLog('error', 'Worker4 error: ' + (e.message || e));
+    };
+    const db3 = new AsyncDuckDB(logger, worker4);
+    await db3.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+
+    await db3.open({
+      path: 'opfs://' + dbName,
+      accessMode: 3,
+      maximumThreads: 4,
+    });
+    addLog('info', 'Database reopened from OPFS');
+
+    const conn2 = await db3.connect();
+    const persisted = await conn2.query("SELECT count(*)::INTEGER AS n FROM persist_test");
+    const persistedText = bufText(persisted);
+
+    // Check for int32 value 3 in Arrow IPC buffer
+    const pBytes = new Uint8Array(persisted);
+    const pBuf = pBytes.buffer.slice(pBytes.byteOffset, pBytes.byteOffset + pBytes.byteLength);
+    const pView = new DataView(pBuf);
+    let found3 = false;
+    for (let i = 0; i <= pBytes.length - 4; i++) {
+      if (pView.getInt32(i, true) === 3) { found3 = true; break; }
+    }
+    if (!found3) {
+      throw new Error('OPFS persistence FAILED: persist_test should have 3 rows after reopen but got: ' + persistedText);
+    }
+    addLog('info', 'OPFS persistence VERIFIED: 3 rows survived db restart');
+    _results.push({ label: 'opfs_persistence', value: 'OK' });
+
+    // Verify actual values
+    const vals = await conn2.query("SELECT val FROM persist_test ORDER BY id");
+    const valsText = bufText(vals);
+    const hasAlpha = valsText.includes('alpha');
+    const hasBeta = valsText.includes('beta');
+    const hasGamma = valsText.includes('gamma');
+    if (!hasAlpha || !hasBeta || !hasGamma) {
+      throw new Error('OPFS persistence FAILED: values not preserved. alpha=' + hasAlpha + ' beta=' + hasBeta + ' gamma=' + hasGamma);
+    }
+    addLog('info', 'OPFS persistence values VERIFIED: alpha, beta, gamma intact');
+
+    await conn2.close();
+    await db3.terminate();
+    addLog('info', 'Verification session terminated');
+
     // Clean up OPFS files (db + wal)
     try {
-      const opfsRoot = await navigator.storage.getDirectory();
+      const opfsCleanup = await navigator.storage.getDirectory();
       for (const name of [dbName, dbName + '.wal']) {
         try {
-          await opfsRoot.removeEntry(name);
+          await opfsCleanup.removeEntry(name);
           addLog('info', 'OPFS file cleaned up: ' + name);
         } catch (e) {
           // May not exist or may still be locked briefly

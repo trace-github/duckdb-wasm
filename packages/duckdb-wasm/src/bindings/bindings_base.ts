@@ -530,6 +530,11 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
         directIO: boolean,
     ): Promise<HandleType> {
         if (protocol === DuckDBDataProtocol.BROWSER_FSACCESS) {
+            // Reuse existing sync handle if one is already open for this file
+            const existing = globalThis.DUCKDB_RUNTIME._files?.get(name) ?? globalThis.DUCKDB_RUNTIME._preparedHandles?.[name];
+            if (existing instanceof FileSystemSyncAccessHandle) {
+                return existing as any;
+            }
             if (handle instanceof FileSystemSyncAccessHandle) {
                 // already a handle is sync handle.
             } else if (handle instanceof FileSystemFileHandle) {

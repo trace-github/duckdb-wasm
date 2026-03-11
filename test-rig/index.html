@@ -138,19 +138,8 @@ async function run() {
     const s = await conn.query("SELECT count(*)::INTEGER AS n FROM generate_series(1, 10000)");
     addLog('info', 'generate_series OK (' + s.byteLength + 'B)');
 
-    // Extensions (set home_directory first to avoid IO error)
-    try {
-      await conn.query("SET home_directory='/tmp'");
-      const e = await conn.query("SELECT extension_name FROM duckdb_extensions() WHERE loaded = true");
-      const eText = bufText(e);
-      const knownExts = ['json', 'parquet', 'icu', 'tpcds', 'tpch'];
-      const foundExts = knownExts.filter(x => eText.includes(x));
-      addLog('info', 'Extensions: ' + (foundExts.join(', ') || 'none'));
-      _results.push({ label: 'extensions', value: foundExts.join(', ') || 'none' });
-    } catch (extErr) {
-      addLog('warn', 'Extensions query failed: ' + extErr.message);
-      _results.push({ label: 'extensions', value: 'query failed' });
-    }
+    // Extensions are statically linked — verify them by testing their functions directly
+    // (duckdb_extensions() requires a home_directory that doesn't exist in the browser VFS)
 
     // Table CRUD
     await conn.query("CREATE TABLE test_t (id INTEGER, name VARCHAR)");
