@@ -674,6 +674,24 @@ duckdb::unique_ptr<duckdb::FileHandle> WebFileSystem::OpenFile(const string &url
                 // Open the file
                 auto *opened = duckdb_web_fs_file_open(file->file_id_, flags.GetFlagsInternal());
                 if (opened == nullptr) {
+                    std::string proto_str;
+                    switch (file->data_protocol_) {
+                        case DataProtocol::BUFFER: proto_str = "BUFFER"; break;
+                        case DataProtocol::NODE_FS: proto_str = "NODE_FS"; break;
+                        case DataProtocol::BROWSER_FILEREADER: proto_str = "BROWSER_FILEREADER"; break;
+                        case DataProtocol::BROWSER_FSACCESS: proto_str = "BROWSER_FSACCESS"; break;
+                        case DataProtocol::HTTP: proto_str = "HTTP"; break;
+                        case DataProtocol::S3: proto_str = "S3"; break;
+                        default: proto_str = "UNKNOWN(" + std::to_string(static_cast<int>(file->data_protocol_)) + ")"; break;
+                    }
+                    std::cerr << "[WebFS] duckdb_web_fs_file_open returned nullptr"
+                              << " | file=" << file->file_name_
+                              << " | id=" << file->file_id_
+                              << " | protocol=" << proto_str
+                              << " | flags=0x" << std::hex << flags.GetFlagsInternal() << std::dec
+                              << " | newly_created=" << (newly_created ? "true" : "false")
+                              << " | ReturnNullIfNotExists=" << (flags.ReturnNullIfNotExists() ? "true" : "false")
+                              << std::endl;
                     if (flags.ReturnNullIfNotExists()) {
                         // Clean up file entries we created above so that
                         // subsequent FileExists() calls don't find a stale entry.
@@ -688,7 +706,10 @@ duckdb::unique_ptr<duckdb::FileHandle> WebFileSystem::OpenFile(const string &url
                         }
                         return nullptr;
                     }
-                    std::string msg = std::string{"Failed to open file: "} + file->file_name_;
+                    std::string msg = std::string{"Failed to open file: "} + file->file_name_
+                        + " (protocol=" + proto_str
+                        + ", flags=0x" + std::to_string(flags.GetFlagsInternal())
+                        + ", newly_created=" + (newly_created ? "true" : "false") + ")";
                     throw std::runtime_error(msg);
                 }
                 auto owned = std::unique_ptr<OpenedFile>(static_cast<OpenedFile *>(opened));

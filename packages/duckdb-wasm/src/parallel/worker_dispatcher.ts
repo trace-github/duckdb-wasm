@@ -137,7 +137,15 @@ export abstract class AsyncDuckDBDispatcher implements Logger {
                 case WorkerRequestType.OPEN: {
                     const path = request.data.path;
                     if (path?.startsWith('opfs://')) {
-                        await this._bindings.prepareDBFileHandle(path, DuckDBDataProtocol.BROWSER_FSACCESS);
+                        // Only prepare sync access handles in JS (_preparedHandles) without
+                        // registering in C++ files_by_name_. This avoids FileExists() returning
+                        // true for empty OPFS files, which would cause DuckDB to try loading
+                        // an existing database from an empty file. The C++ OpenFile flow will
+                        // discover the handles via the JS openFile callback.
+                        const runtime = globalThis.DUCKDB_RUNTIME;
+                        if (runtime?.prepareDBFileHandle) {
+                            await runtime.prepareDBFileHandle(path, DuckDBDataProtocol.BROWSER_FSACCESS);
+                        }
                         request.data.useDirectIO = true;
                     }
                     this._bindings.open(request.data);
