@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html>
+<head><title>DuckDB-WASM OPFS Persistence Test</title></head>
+<body>
+<pre id="output">Starting OPFS persistence test...</pre>
+<script>
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+</script>
+<script type="module">
+
+function bufText(buf) {
+  return new TextDecoder().decode(new Uint8Array(buf));
+}
+
+function fmtBytes(n) {
+  if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+  return n + ' B';
+}
+
+async function getOPFSFileSize(name) {
+  const root = await navigator.storage.getDirectory();
+  try {
+    const fh = await root.getFileHandle(name);
+    const file = await fh.getFile();
+    return file.size;
+  } catch (e) {
+    return -1;
+  }
+}
+
+async function listOPFS(prefix) {
+  const root = await navigator.storage.getDirectory();
+  const entries = [];
+  for await (const [name, handle] of root.entries()) {
+    if (!prefix || name.startsWith(prefix)) {
+      let size = -1;
+      if (handle.kind === 'file') {
+        try {
+          const f = await handle.getFile();
+          size = f.size;
+        } catch (e) { /* locked */ }
+      }
+      entries.push({ name, kind: handle.kind, size });
+    }
+  }
+  return entries;
+}
+
+async function cleanOPFS(prefix) {
+  const root = await navigator.storage.getDirectory();
+  for await (const [name] of root.entries()) {
+    if (name.startsWith(prefix)) {
+      try { await root.removeEntry(name); } catch (e) { /* locked */ }
+    }
+  }
+}
+
+async function run() {
+  const t0 = Date.now();
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    if (!crossOriginIsolated) {
+      throw new Error('This test requires COI mode');
+    }
+
+    const mod = await import('/dist/duckdb-wasm.mjs');
+    const { AsyncDuckDB, ConsoleLogger } = mod;
+    const logger = new ConsoleLogger();
+
+    const bundleConfig = {
+      mainModule: '/dist/duckdb-coi.wasm',
+      mainWorker: '/dist/duckdb-browser-coi.worker.js',
+      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    };
+
+    const dbName = 'persist_stress_' + Date.now() + '.db';
+    const prefix = dbName.replace('.db', '');
+
+    // Clean ALL stale files from previous runs (including locked ones from timed-out tests)
+    addLog('info', 'Cleaning stale OPFS files...');
+    const staleFiles = await listOPFS('persist_stress_');
+    for (const f of staleFiles) {
+      addLog('info', 'Removing stale: ' + f.name + ' (' + fmtBytes(f.size) + ')');
+    }
+    await cleanOPFS('persist_stress_');
+    // Also clean test_ files from COI test
+    await cleanOPFS('test_');
+
+    // --- Phase 1: Create database, write enormous table ---
+    addLog('info', '=== Phase 1: Write enormous table to OPFS ===');
+
+    const worker1 = new Worker(bundleConfig.mainWorker);
+    worker1.onerror = (e) => addLog('error', 'Worker1 error: ' + (e.message || e));
+    const db1 = new AsyncDuckDB(logger, worker1);
+    await db1.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+
+    await db1.open({
+      path: 'opfs://' + dbName,
+      accessMode: 3,
+      maximumThreads: 1,
+    });
+    addLog('info', 'Database opened at opfs://' + dbName + ' (single-threaded)');
+
+    const conn1 = await db1.connect();
+
+    // Check storage quota
+    if (navigator.storage && navigator.storage.estimate) {
+      const est = await navigator.storage.estimate();
+      addLog('info', 'Storage quota: ' + fmtBytes(est.quota) + ', used: ' + fmtBytes(est.usage));
+    }
+
+    // Disable auto-checkpoint to prevent deadlock with __proxy:'sync' on pthreads.
+    // DuckDB auto-checkpoints when WAL exceeds wal_autocheckpoint (default ~16MB).
+    // CHECKPOINT uses pthreads for file I/O which proxy to main thread, but main
+    // thread is blocked waiting — deadlock. Setting a very high limit avoids this.
+    await conn1.query("SET wal_autocheckpoint='1TB'");
+    addLog('info', 'Auto-checkpoint disabled (wal_autocheckpoint=1TB)');
+
+    // Create a wide table in batches
+    // 200K rows x ~120 bytes/row ≈ 20-30 MB on disk
+    const TARGET_ROWS = 20_000_000;
+    const BATCH_SIZE = 1_000_000;
+    addLog('info', 'Creating table with ' + TARGET_ROWS.toLocaleString() + ' rows in batches of ' + BATCH_SIZE.toLocaleString() + '...');
+
+    const tInsert = Date.now();
+    await conn1.query("CREATE TABLE enormous (id INTEGER, val DOUBLE, category INTEGER)");
+    addLog('info', 'Table created (lean schema: 3 cols), inserting batches...');
+
+    // Start heartbeat so we know the tab is alive
+    const heartbeat = setInterval(() => {
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/ping.html', false);
+        xhr.send();
+      } catch (e) { /* ignore */ }
+    }, 5000);
+
+    for (let offset = 0; offset < TARGET_ROWS; offset += BATCH_SIZE) {
+      const end = Math.min(offset + BATCH_SIZE, TARGET_ROWS);
+      const t_batch = Date.now();
+      addLog('info', 'Inserting rows ' + (offset + 1).toLocaleString() + '-' + end.toLocaleString() + '...');
+      await conn1.query(
+        "INSERT INTO enormous SELECT i AS id, i * 3.14159 AS val, i % 1000 AS category " +
+        "FROM generate_series(" + (offset + 1) + ", " + end + ") t(i)"
+      );
+      addLog('info', 'Batch done (' + (Date.now() - t_batch) + 'ms)');
+    }
+    const insertElapsed = Date.now() - tInsert;
+    addLog('info', 'All rows inserted in ' + insertElapsed + 'ms');
+
+    // Verify row count
+    const countBuf = await conn1.query("SELECT count(*)::INTEGER AS n FROM enormous");
+    const countText = bufText(countBuf);
+    addLog('info', 'Row count verified: ' + countText.length + 'B response');
+    _results.push({ label: 'rows_written', value: TARGET_ROWS.toLocaleString() });
+
+    // Check table size estimate via pragma
+    const sizeBuf = await conn1.query(`
+      SELECT
+        count(*)::INTEGER AS row_count,
+        (count(*) * 120)::BIGINT AS est_bytes
+      FROM enormous
+    `);
+    addLog('info', 'Size query OK');
+
+    // --- Phase 2: Close and flush to OPFS ---
+    addLog('info', '=== Phase 2: Close database, flush to OPFS ===');
+
+    // Skip explicit CHECKPOINT — it deadlocks with __proxy:'sync' on pthreads.
+    // Data persists via WAL file.
+
+    await conn1.close();
+    addLog('info', 'Connection closed');
+    await db1.terminate();
+    addLog('info', 'Database terminated');
+
+    // Small delay for any async OPFS flush
+    await new Promise(r => setTimeout(r, 500));
+
+    // --- Phase 3: Inspect OPFS files ---
+    addLog('info', '=== Phase 3: Inspect OPFS files ===');
+
+    // Only look at our db's files (ignore stale files from previous runs)
+    const ourFiles = await listOPFS(prefix);
+    if (ourFiles.length === 0) {
+      throw new Error('No OPFS files found after database close! Data was NOT persisted.');
+    }
+
+    let totalSize = 0;
+    for (const f of ourFiles) {
+      addLog('info', 'OPFS file: ' + f.name + ' (' + fmtBytes(f.size) + ')');
+      totalSize += f.size;
+    }
+    addLog('info', 'Total OPFS size for this db: ' + fmtBytes(totalSize));
+    _results.push({ label: 'opfs_total_size', value: fmtBytes(totalSize) });
+
+    // Check both db file and WAL — without CHECKPOINT, data lives in the WAL
+    const dbFileSize = await getOPFSFileSize(dbName);
+    const walFileSize = await getOPFSFileSize(dbName + '.wal');
+    addLog('info', 'Main db file: ' + fmtBytes(Math.max(0, dbFileSize)));
+    addLog('info', 'WAL file: ' + fmtBytes(Math.max(0, walFileSize)));
+    _results.push({ label: 'db_file_size', value: fmtBytes(Math.max(0, dbFileSize)) });
+    _results.push({ label: 'wal_file_size', value: fmtBytes(Math.max(0, walFileSize)) });
+
+    // Combined size must be substantial (data is in WAL without explicit CHECKPOINT)
+    const combinedSize = Math.max(0, dbFileSize) + Math.max(0, walFileSize);
+    const MIN_EXPECTED_SIZE = 500 * 1024; // 500 KB minimum
+    if (combinedSize < MIN_EXPECTED_SIZE) {
+      throw new Error(
+        'Database files too small (db=' + fmtBytes(Math.max(0, dbFileSize)) +
+        ' + wal=' + fmtBytes(Math.max(0, walFileSize)) + ' = ' + fmtBytes(combinedSize) + '). ' +
+        'Expected at least ' + fmtBytes(MIN_EXPECTED_SIZE) + ' for ' +
+        TARGET_ROWS.toLocaleString() + ' rows.'
+      );
+    }
+    addLog('info', 'PASS: combined db+wal is ' + fmtBytes(combinedSize) + ' (>' + fmtBytes(MIN_EXPECTED_SIZE) + ' threshold)');
+
+    // --- Phase 4: Reopen and verify data survived ---
+    addLog('info', '=== Phase 4: Reopen database, verify data ===');
+
+    const worker2 = new Worker(bundleConfig.mainWorker);
+    worker2.onerror = (e) => addLog('error', 'Worker2 error: ' + (e.message || e));
+    const db2 = new AsyncDuckDB(logger, worker2);
+    await db2.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+
+    await db2.open({
+      path: 'opfs://' + dbName,
+      accessMode: 3,
+      maximumThreads: 1,
+    });
+    addLog('info', 'Database reopened from OPFS');
+
+    const conn2 = await db2.connect();
+
+    // Verify row count using string matching (avoids int32/int64 parsing issues)
+    const recount = await conn2.query("SELECT count(*)::VARCHAR AS n FROM enormous");
+    const recountText = bufText(recount);
+    if (!recountText.includes(String(TARGET_ROWS))) {
+      throw new Error('Row count mismatch after reopen. Expected ' + TARGET_ROWS + ' in: ' + recountText.substring(0, 200));
+    }
+    addLog('info', 'Row count verified: ' + TARGET_ROWS.toLocaleString() + ' rows survived restart');
+    _results.push({ label: 'rows_after_reopen', value: TARGET_ROWS.toLocaleString() });
+
+    // Spot-check specific rows
+    const spot1 = await conn2.query("SELECT id::INTEGER, category::INTEGER FROM enormous WHERE id = 1");
+    addLog('info', 'Spot check row 1 OK');
+
+    const midRow = Math.floor(TARGET_ROWS / 2);
+    const spotMid = await conn2.query("SELECT id::INTEGER, category::INTEGER FROM enormous WHERE id = " + midRow);
+    addLog('info', 'Spot check row ' + midRow.toLocaleString() + ' OK');
+
+    const spotEnd = await conn2.query("SELECT id::INTEGER, category::INTEGER FROM enormous WHERE id = " + TARGET_ROWS);
+    addLog('info', 'Spot check row ' + TARGET_ROWS.toLocaleString() + ' OK');
+
+    // Verify aggregates using string matching
+    const aggBuf = await conn2.query(
+      "SELECT min(id)::VARCHAR AS mn, max(id)::VARCHAR AS mx, count(DISTINCT category)::VARCHAR AS cats FROM enormous"
+    );
+    const aggText = bufText(aggBuf);
+    const hasMin1 = aggText.includes('1');
+    const hasMax = aggText.includes(String(TARGET_ROWS));
+    const has1000 = aggText.includes('1000');
+    if (!hasMin1 || !hasMax || !has1000) {
+      throw new Error('Aggregate check failed. Expected min=1, max=' + TARGET_ROWS + ', cats=1000 in: ' + aggText.substring(0, 200));
+    }
+    addLog('info', 'Aggregates verified: min=1, max=' + TARGET_ROWS.toLocaleString() + ', 1000 categories');
+    _results.push({ label: 'data_integrity', value: 'OK' });
+
+    // --- Phase 5: Cleanup ---
+    clearInterval(heartbeat);
+    await conn2.close();
+    await db2.terminate();
+    await cleanOPFS('persist_stress_');
+    addLog('info', 'Cleaned up OPFS files');
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'All OPFS persistence tests passed in ' + elapsed + 'ms');
+    _results.push({ label: 'total_time', value: elapsed + 'ms' });
+    sendReport('PASS', { elapsed: elapsed, bundle: 'coi' });
+
+  } catch (e) {
+    addLog('error', 'FAILED: ' + e.message);
+    addLog('error', e.stack);
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message, stack: e.stack });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

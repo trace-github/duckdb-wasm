@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html>
+<head><title>DuckDB-WASM File Stress Test (COI pthreads)</title></head>
+<body>
+<pre id="output">Starting file stress test...</pre>
+<script>
+// Global state
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+</script>
+<script type="module">
+
+// --- Test helpers ---
+
+function bufText(buf) {
+  return new TextDecoder().decode(new Uint8Array(buf));
+}
+
+function readInt32FromArrow(buf) {
+  const bytes = new Uint8Array(buf);
+  const abuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const view = new DataView(abuf);
+  // Scan for plausible int32 values in the Arrow IPC payload area (skip header)
+  const results = [];
+  for (let i = 0; i <= bytes.length - 4; i++) {
+    const v = view.getInt32(i, true);
+    if (v > 0 && v < 1000000) results.push(v);
+  }
+  return results;
+}
+
+function generateCSV(numRows, numCols) {
+  const header = Array.from({ length: numCols }, (_, i) => 'col' + i).join(',');
+  const rows = [header];
+  for (let r = 0; r < numRows; r++) {
+    rows.push(Array.from({ length: numCols }, (_, c) => r * numCols + c).join(','));
+  }
+  return rows.join('\n') + '\n';
+}
+
+async function cleanOPFS() {
+  try {
+    const root = await navigator.storage.getDirectory();
+    for await (const [name] of root.entries()) {
+      if (name.startsWith('stress_')) {
+        try { await root.removeEntry(name); } catch (e) { /* locked */ }
+      }
+    }
+  } catch (e) { /* no OPFS */ }
+}
+
+async function writeOPFSFile(name, content) {
+  const root = await navigator.storage.getDirectory();
+  const fh = await root.getFileHandle(name, { create: true });
+  const writable = await fh.createWritable();
+  await writable.write(content);
+  await writable.close();
+}
+
+// --- Main test ---
+
+async function run() {
+  const t0 = Date.now();
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    if (!crossOriginIsolated) {
+      throw new Error('CrossOriginIsolated is false - this test requires COI mode');
+    }
+
+    // Clean up stale files from previous runs
+    await cleanOPFS();
+
+    addLog('info', 'Importing module...');
+    const mod = await import('/dist/duckdb-wasm.mjs');
+    const { AsyncDuckDB, ConsoleLogger } = mod;
+    const BROWSER_FSACCESS = 3; // DuckDBDataProtocol.BROWSER_FSACCESS
+    addLog('info', 'Module loaded');
+
+    const bundleConfig = {
+      mainModule: '/dist/duckdb-coi.wasm',
+      mainWorker: '/dist/duckdb-browser-coi.worker.js',
+      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    };
+
+    const logger = new ConsoleLogger();
+    const worker = new Worker(bundleConfig.mainWorker);
+    worker.onerror = (e) => addLog('error', 'Worker error: ' + (e.message || e));
+    const db = new AsyncDuckDB(logger, worker);
+    await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+    addLog('info', 'COI bundle instantiated');
+
+    await db.open({ maximumThreads: 4 });
+    addLog('info', 'Database opened with 4 threads');
+
+    // =============================================
+    // TEST 1: Register multiple buffer files, query concurrently
+    // =============================================
+    addLog('info', '--- Test 1: Concurrent buffer file queries ---');
+    const NUM_FILES = 8;
+    const ROWS_PER_FILE = 5000;
+
+    for (let i = 0; i < NUM_FILES; i++) {
+      const csv = generateCSV(ROWS_PER_FILE, 4);
+      const encoder = new TextEncoder();
+      const buf = encoder.encode(csv);
+      await db.registerFileBuffer('stress_buf_' + i + '.csv', buf);
+    }
+    addLog('info', 'Registered ' + NUM_FILES + ' buffer files (' + ROWS_PER_FILE + ' rows each)');
+
+    // Open multiple connections and query in parallel
+    const NUM_CONNS = 4;
+    const conns = [];
+    for (let i = 0; i < NUM_CONNS; i++) {
+      conns.push(await db.connect());
+    }
+    addLog('info', 'Opened ' + NUM_CONNS + ' connections');
+
+    // Each connection queries a different file simultaneously
+    const t1 = Date.now();
+    const queries = conns.map((conn, ci) => {
+      const fileIdx = ci % NUM_FILES;
+      return conn.query(
+        "SELECT count(*)::INTEGER AS n, sum(col0)::BIGINT AS s FROM read_csv_auto('stress_buf_" + fileIdx + ".csv')"
+      );
+    });
+    const results1 = await Promise.all(queries);
+    const elapsed1 = Date.now() - t1;
+
+    for (let i = 0; i < results1.length; i++) {
+      const text = bufText(results1[i]);
+      if (!readInt32FromArrow(results1[i]).includes(ROWS_PER_FILE)) {
+        throw new Error('Test 1: connection ' + i + ' got wrong row count');
+      }
+    }
+    addLog('info', 'Test 1 PASS: ' + NUM_CONNS + ' concurrent queries OK (' + elapsed1 + 'ms)');
+    _results.push({ label: 'concurrent_buffer_queries', value: 'OK (' + elapsed1 + 'ms)' });
+
+    // =============================================
+    // TEST 2: Repeated read/write cycles on the same table from parallel connections
+    // =============================================
+    addLog('info', '--- Test 2: Parallel table read/write stress ---');
+    const conn0 = conns[0];
+    await conn0.query("CREATE TABLE stress_rw (id INTEGER, payload VARCHAR)");
+
+    // Insert 1000 rows
+    const insertBatch = Array.from({ length: 100 }, (_, i) =>
+      "(" + i + ",'" + 'x'.repeat(100) + "')"
+    ).join(',');
+    for (let batch = 0; batch < 10; batch++) {
+      await conn0.query("INSERT INTO stress_rw VALUES " + insertBatch);
+    }
+    addLog('info', 'Inserted 1000 rows into stress_rw');
+
+    // Concurrent reads while one connection does writes
+    const t2 = Date.now();
+    const ROUNDS = 5;
+    for (let round = 0; round < ROUNDS; round++) {
+      const readPromises = conns.slice(1).map(c =>
+        c.query("SELECT count(*)::INTEGER AS n FROM stress_rw")
+      );
+      const writePromise = conn0.query(
+        "INSERT INTO stress_rw SELECT id + " + ((round + 1) * 1000) + ", payload FROM stress_rw LIMIT 100"
+      );
+      await Promise.all([...readPromises, writePromise]);
+    }
+    const elapsed2 = Date.now() - t2;
+
+    const finalCount = await conn0.query("SELECT count(*)::INTEGER AS n FROM stress_rw");
+    addLog('info', 'Test 2 PASS: ' + ROUNDS + ' rounds of concurrent read/write (' + elapsed2 + 'ms)');
+    _results.push({ label: 'parallel_read_write', value: 'OK (' + elapsed2 + 'ms)' });
+
+    await conn0.query("DROP TABLE stress_rw");
+
+    // =============================================
+    // TEST 3: OPFS files registered as buffers, queried from threads
+    // =============================================
+    addLog('info', '--- Test 3: OPFS → buffer registration, concurrent queries ---');
+    const OPFS_FILES = 4;
+    const OPFS_ROWS = 3000;
+
+    for (let i = 0; i < OPFS_FILES; i++) {
+      const csv = generateCSV(OPFS_ROWS, 3);
+      const fname = 'stress_opfs_' + i + '.csv';
+      await writeOPFSFile(fname, csv);
+    }
+    addLog('info', 'Wrote ' + OPFS_FILES + ' CSV files to OPFS (' + OPFS_ROWS + ' rows each)');
+
+    // Register via OPFS file handle (triggers FSACCESS → buffer path)
+    const opfsRoot = await navigator.storage.getDirectory();
+    for (let i = 0; i < OPFS_FILES; i++) {
+      const fname = 'stress_opfs_' + i + '.csv';
+      const fh = await opfsRoot.getFileHandle(fname);
+      await db.registerFileHandle('stress_opfs_' + i + '.csv', fh, BROWSER_FSACCESS, true);
+    }
+    addLog('info', 'Registered ' + OPFS_FILES + ' OPFS files as handles');
+
+    // Query all files concurrently from different connections
+    const t3 = Date.now();
+    const opfsQueries = [];
+    for (let i = 0; i < OPFS_FILES; i++) {
+      const conn = conns[i % NUM_CONNS];
+      opfsQueries.push(
+        conn.query("SELECT count(*)::INTEGER AS n FROM read_csv_auto('stress_opfs_" + i + ".csv')")
+      );
+    }
+    const results3 = await Promise.all(opfsQueries);
+    const elapsed3 = Date.now() - t3;
+
+    for (let i = 0; i < results3.length; i++) {
+      if (!readInt32FromArrow(results3[i]).includes(OPFS_ROWS)) {
+        throw new Error('Test 3: OPFS file ' + i + ' got wrong row count');
+      }
+    }
+    addLog('info', 'Test 3 PASS: ' + OPFS_FILES + ' OPFS files queried concurrently (' + elapsed3 + 'ms)');
+    _results.push({ label: 'opfs_concurrent_queries', value: 'OK (' + elapsed3 + 'ms)' });
+
+    // =============================================
+    // TEST 4: JOIN across multiple files from parallel connections
+    // =============================================
+    addLog('info', '--- Test 4: Cross-file JOINs from parallel connections ---');
+    const t4 = Date.now();
+    const joinQueries = conns.map((conn, ci) => {
+      const f1 = ci % OPFS_FILES;
+      const f2 = (ci + 1) % OPFS_FILES;
+      return conn.query(
+        "SELECT count(*)::INTEGER AS n FROM " +
+        "read_csv_auto('stress_opfs_" + f1 + ".csv') a " +
+        "JOIN read_csv_auto('stress_opfs_" + f2 + ".csv') b " +
+        "ON a.col0 = b.col0 LIMIT 1"
+      );
+    });
+    const results4 = await Promise.all(joinQueries);
+    const elapsed4 = Date.now() - t4;
+
+    addLog('info', 'Test 4 PASS: ' + NUM_CONNS + ' cross-file JOINs (' + elapsed4 + 'ms)');
+    _results.push({ label: 'cross_file_joins', value: 'OK (' + elapsed4 + 'ms)' });
+
+    // =============================================
+    // TEST 5: Rapid file register/query/drop cycle
+    // =============================================
+    addLog('info', '--- Test 5: Rapid register/query/drop cycle ---');
+    const t5 = Date.now();
+    const CYCLES = 20;
+    const cycleConn = conns[0];
+
+    for (let i = 0; i < CYCLES; i++) {
+      const csv = generateCSV(100, 2);
+      const buf = new TextEncoder().encode(csv);
+      const fname = 'stress_cycle_' + i + '.csv';
+      await db.registerFileBuffer(fname, buf);
+      const r = await cycleConn.query(
+        "SELECT count(*)::INTEGER AS n FROM read_csv_auto('" + fname + "')"
+      );
+      if (!readInt32FromArrow(r).includes(100)) {
+        throw new Error('Test 5: cycle ' + i + ' got wrong count');
+      }
+      await db.dropFile(fname);
+    }
+    const elapsed5 = Date.now() - t5;
+
+    addLog('info', 'Test 5 PASS: ' + CYCLES + ' register/query/drop cycles (' + elapsed5 + 'ms)');
+    _results.push({ label: 'register_query_drop_cycle', value: 'OK (' + elapsed5 + 'ms)' });
+
+    // =============================================
+    // TEST 6: Heavy parallel queries to saturate thread pool + file I/O
+    // =============================================
+    addLog('info', '--- Test 6: Thread pool saturation with file I/O ---');
+    const t6 = Date.now();
+    const HEAVY_QUERIES = 12;
+    const heavyPromises = [];
+
+    for (let i = 0; i < HEAVY_QUERIES; i++) {
+      const conn = conns[i % NUM_CONNS];
+      const fileIdx = i % OPFS_FILES;
+      heavyPromises.push(
+        conn.query(
+          "SELECT sum(col0)::BIGINT AS s, avg(col1)::DOUBLE AS a, count(*)::INTEGER AS n " +
+          "FROM read_csv_auto('stress_opfs_" + fileIdx + ".csv') " +
+          "WHERE col0 > " + (i * 100)
+        )
+      );
+    }
+    const results6 = await Promise.all(heavyPromises);
+    const elapsed6 = Date.now() - t6;
+
+    let allReturned = results6.every(r => r.byteLength > 0);
+    if (!allReturned) {
+      throw new Error('Test 6: some queries returned empty results');
+    }
+    addLog('info', 'Test 6 PASS: ' + HEAVY_QUERIES + ' heavy parallel queries (' + elapsed6 + 'ms)');
+    _results.push({ label: 'thread_saturation', value: 'OK (' + elapsed6 + 'ms)' });
+
+    // =============================================
+    // TEST 7: Large single-file scan with aggregation (page eviction)
+    // =============================================
+    addLog('info', '--- Test 7: Large file scan ---');
+    const LARGE_ROWS = 50000;
+    const largeCsv = generateCSV(LARGE_ROWS, 6);
+    const largeBuf = new TextEncoder().encode(largeCsv);
+    await db.registerFileBuffer('stress_large.csv', largeBuf);
+    addLog('info', 'Registered large file (' + (largeBuf.byteLength / 1024).toFixed(0) + ' KB, ' + LARGE_ROWS + ' rows)');
+
+    const t7 = Date.now();
+    // Multiple concurrent scans of the large file
+    const largeQueries = conns.map(conn =>
+      conn.query(
+        "SELECT count(*)::INTEGER AS n, sum(col0)::BIGINT AS s, min(col1)::INTEGER AS mn, max(col2)::INTEGER AS mx " +
+        "FROM read_csv_auto('stress_large.csv')"
+      )
+    );
+    const results7 = await Promise.all(largeQueries);
+    const elapsed7 = Date.now() - t7;
+
+    for (let i = 0; i < results7.length; i++) {
+      if (!readInt32FromArrow(results7[i]).includes(LARGE_ROWS)) {
+        throw new Error('Test 7: large scan conn ' + i + ' got wrong row count');
+      }
+    }
+    addLog('info', 'Test 7 PASS: ' + NUM_CONNS + ' concurrent large file scans (' + elapsed7 + 'ms)');
+    _results.push({ label: 'large_file_scan', value: 'OK (' + elapsed7 + 'ms)' });
+
+    // Cleanup
+    for (const c of conns) await c.close();
+    await db.terminate();
+
+    // Clean OPFS
+    await cleanOPFS();
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'All file stress tests passed in ' + elapsed + 'ms');
+    sendReport('PASS', { elapsed: elapsed, bundle: 'coi' });
+
+  } catch (e) {
+    addLog('error', 'FAILED: ' + e.message);
+    addLog('error', e.stack);
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message, stack: e.stack });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

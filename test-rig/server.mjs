@@ -32,6 +32,13 @@ const server = createServer(async (req, res) => {
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Access-Control-Allow-Origin', '*');
 
+  // Log all requests for debugging
+  if (req.url !== '/ping.html') {
+    // Don't log heartbeat pings
+  } else {
+    console.log(`[heartbeat] ${new Date().toISOString()}`);
+  }
+
   if (req.method === 'POST' && req.url === '/report') {
     // Collect browser test results
     let body = '';
