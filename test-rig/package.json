@@ -1,0 +1,8 @@
+{
+  "name": "duckdb-wasm-test-rig",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "puppeteer-core": "^24.0.0"
+  }
+}

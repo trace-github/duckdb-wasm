@@ -35,3 +35,9 @@
 [submodule "submodules/evalexpr_rhai"]
 	path = submodules/evalexpr_rhai
 	url = https://github.com/query-farm/evalexpr_rhai.git
+[submodule "submodules/duckdb_lua"]
+	path = submodules/duckdb_lua
+	url = https://github.com/isaacbrodsky/duckdb-lua.git
+[submodule "submodules/lua"]
+	path = submodules/lua
+	url = https://github.com/lua/lua.git

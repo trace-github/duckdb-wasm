@@ -57,6 +57,7 @@
 #include "duckdb/web/extensions/tpcds_extension.h"
 #include "duckdb/web/extensions/tpch_extension.h"
 #include "duckdb/web/extensions/evalexpr_rhai_extension.h"
+#include "duckdb/web/extensions/lua_extension.h"
 #include "duckdb/web/functions/table_function_relation.h"
 #include "duckdb/web/http_wasm.h"
 #include "duckdb/web/io/arrow_ifstream.h"
@@ -64,6 +65,10 @@
 #include "duckdb/web/io/file_page_buffer.h"
 #include "duckdb/web/io/ifstream.h"
 #include "duckdb/web/io/web_filesystem.h"
+#ifdef DUCKDB_WASMFS
+#include "duckdb/web/io/wasmfs_filesystem.h"
+#include <emscripten/wasmfs.h>
+#endif
 #include "duckdb/web/json_analyzer.h"
 #include "duckdb/web/json_dataview.h"
 #include "duckdb/web/json_insert_options.h"
@@ -120,7 +125,7 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::MaterializeQuer
     ArrowSchema raw_schema;
     bool lossless_conversion = webdb_.config_->arrow_lossless_conversion;
     ClientProperties options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion,
-                             ArrowFormatVersion::V1_5, connection_.context);
+                             ArrowFormatVersion::V1_0, connection_.context);
     unordered_map<idx_t, const shared_ptr<ArrowTypeExtensionData>> extension_type_cast;
     options.arrow_offset_size = ArrowOffsetSize::REGULAR;
     ArrowConverter::ToArrowSchema(&raw_schema, result->types, result->names, options);
@@ -158,7 +163,7 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::StreamQueryResu
     ArrowSchema raw_schema;
     bool lossless_conversion = webdb_.config_->arrow_lossless_conversion;
     ClientProperties options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion,
-                             ArrowFormatVersion::V1_5, connection_.context);
+                             ArrowFormatVersion::V1_0, connection_.context);
     options.arrow_offset_size = ArrowOffsetSize::REGULAR;
     ArrowConverter::ToArrowSchema(&raw_schema, current_query_result_->types, current_query_result_->names, options);
     ARROW_ASSIGN_OR_RAISE(current_schema_, arrow::ImportSchema(&raw_schema));
@@ -342,7 +347,7 @@ DuckDBWasmResultsWrapper WebDB::Connection::FetchQueryResults() {
         ArrowArray array;
         bool lossless_conversion = webdb_.config_->arrow_lossless_conversion;
         ClientProperties arrow_options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion,
-                                       ArrowFormatVersion::V1_5, connection_.context);
+                                       ArrowFormatVersion::V1_0, connection_.context);
         unordered_map<idx_t, const shared_ptr<ArrowTypeExtensionData>> extension_type_cast;
         arrow_options.arrow_offset_size = ArrowOffsetSize::REGULAR;
         ArrowConverter::ToArrowArray(*chunk, &array, arrow_options, extension_type_cast);
@@ -976,11 +981,17 @@ arrow::Status WebDB::Open(std::string_view args_json) {
         db_config.options.duckdb_api = "wasm";
         db_config.options.custom_user_agent = config_->custom_user_agent;
         db_config.options.use_direct_io = config_->use_direct_io;
-        // Skip MagicBytes file-type detection during initialization.
-        // It calls OpenFile which registers the file in WebFileSystem::files_by_name_
-        // before StorageManager::FileExists is called, causing empty OPFS files to
-        // appear as "existing" and triggering "exists but not valid" errors.
-        db_config.options.database_type = "duckdb";
+#ifdef DUCKDB_WASMFS
+        // Mount OPFS as /opfs via WasmFS
+        static bool opfs_mounted = false;
+        if (!opfs_mounted) {
+            auto backend = wasmfs_create_opfs_backend();
+            wasmfs_create_directory("/opfs", 0777, backend);
+            opfs_mounted = true;
+        }
+        // Register WasmFS subsystem so opfs:// paths route through POSIX I/O
+        db_config.file_system->RegisterSubSystem(make_uniq<io::WasmFSFileSystem>());
+#endif
         auto db = make_shared_ptr<duckdb::DuckDB>(config_->path, &db_config);
 #ifndef WASM_LOADABLE_EXTENSIONS
         duckdb_web_parquet_init(db.get());
@@ -989,6 +1000,7 @@ arrow::Status WebDB::Open(std::string_view args_json) {
         duckdb_web_tpcds_init(db.get());
         duckdb_web_tpch_init(db.get());
         duckdb_web_evalexpr_rhai_init(db.get());
+        duckdb_web_lua_init(db.get());
 #endif  // WASM_LOADABLE_EXTENSIONS
         RegisterCustomExtensionOptions(db);
 

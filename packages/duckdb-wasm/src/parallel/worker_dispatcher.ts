@@ -1,4 +1,4 @@
-import { DuckDBBindings, DuckDBDataProtocol } from '../bindings';
+import { DuckDBBindings, DuckDBDataProtocol, DuckDBFeature } from '../bindings';
 import { WorkerResponseVariant, WorkerRequestVariant, WorkerRequestType, WorkerResponseType } from './worker_request';
 import { Logger, LogEntryVariant } from '../log';
 import { InstantiationProgress } from '../bindings/progress';
@@ -136,12 +136,14 @@ export abstract class AsyncDuckDBDispatcher implements Logger {
 
                 case WorkerRequestType.OPEN: {
                     const path = request.data.path;
-                    if (path?.startsWith('opfs://')) {
+                    const hasWasmFS = !!(this._bindings!.getFeatureFlags() & DuckDBFeature.WASM_THREADS);
+                    if (path?.startsWith('opfs://') && !hasWasmFS) {
                         // Only prepare sync access handles in JS (_preparedHandles) without
                         // registering in C++ files_by_name_. This avoids FileExists() returning
                         // true for empty OPFS files, which would cause DuckDB to try loading
                         // an existing database from an empty file. The C++ OpenFile flow will
                         // discover the handles via the JS openFile callback.
+                        // Skip when WasmFS is active: WasmFS handles OPFS via POSIX I/O directly.
                         const runtime = globalThis.DUCKDB_RUNTIME;
                         if (runtime?.prepareDBFileHandle) {
                             await runtime.prepareDBFileHandle(path, DuckDBDataProtocol.BROWSER_FSACCESS);

@@ -1,5 +1,9 @@
 # Claude Code Guidelines for duckdb-wasm
 
+## Critical Rules
+
+- **NEVER kill Chrome or any user application.** Do not use `pkill`, `kill`, or similar commands on Chrome, browsers, or any application the user may have open. This destroys the user's open tabs and work. If stale browser tabs cause issues (e.g., OPFS lock contention), use workarounds like unique file names per run. Only kill processes that were explicitly started by the current script/session.
+
 ## Build Instructions
 
 **All builds MUST use the Docker container.** Do NOT build on the host machine directly — the Docker container has the correct versions of emscripten, binaryen, and all other build tools pinned and tested.

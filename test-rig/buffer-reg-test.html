@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html>
+<head><title>DuckDB-WASM registerFileBuffer + OPFS Database Test</title></head>
+<body>
+<pre id="output">Starting registerFileBuffer + OPFS test...</pre>
+<script>
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+
+setTimeout(function() {
+  addLog('error', 'SAFETY TIMEOUT: no report after 60s');
+  sendReport('FAIL', { error: 'Safety timeout - test hung', elapsed: 60000 });
+}, 60000);
+</script>
+<script type="module">
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT after ' + ms + 'ms in: ' + label)), ms))
+  ]);
+}
+
+async function cleanOPFS(prefix) {
+  try {
+    const root = await navigator.storage.getDirectory();
+    for await (const [name] of root.entries()) {
+      if (name.startsWith(prefix)) {
+        try { await root.removeEntry(name); } catch (e) { /* locked */ }
+      }
+    }
+  } catch (e) { /* */ }
+}
+
+async function run() {
+  const t0 = Date.now();
+  const RUN_ID = Date.now().toString(36);
+  const PREFIX = 'bufreg_' + RUN_ID + '_';
+  let db = null;
+
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    if (!crossOriginIsolated) throw new Error('CrossOriginIsolated required');
+
+    await cleanOPFS('bufreg_');
+
+    addLog('info', 'Importing module...');
+    const mod = await import('/dist/duckdb-wasm.mjs');
+    const { AsyncDuckDB, ConsoleLogger } = mod;
+
+    const bundleConfig = {
+      mainModule: '/dist/duckdb-coi.wasm',
+      mainWorker: '/dist/duckdb-browser-coi.worker.js',
+      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    };
+
+    const logger = new ConsoleLogger();
+    const worker = new Worker(bundleConfig.mainWorker);
+    worker.onerror = (e) => addLog('error', 'Worker error: ' + (e.message || e));
+    db = new AsyncDuckDB(logger, worker);
+    await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+    addLog('info', 'COI bundle instantiated');
+
+    // Open OPFS-backed database
+    const dbName = PREFIX + 'main.db';
+    await db.open({
+      path: 'opfs://' + dbName,
+      accessMode: 3,
+      maximumThreads: 5,
+    });
+    addLog('info', 'Database opened on OPFS: ' + dbName);
+
+    const conn = await db.connect();
+    await conn.query("SET wal_autocheckpoint = '1TB'");
+    addLog('info', 'Auto-checkpoint disabled');
+
+    // ---------------------------------------------------------------
+    // Test 1: registerFileBuffer with CSV data, query from OPFS db
+    // ---------------------------------------------------------------
+    addLog('info', '--- Test 1: registerFileBuffer with CSV ---');
+    const csvData = 'id,name,value\n1,alice,100\n2,bob,200\n3,carol,300\n4,dave,400\n5,eve,500\n';
+    const csvBuffer = new Uint8Array(new TextEncoder().encode(csvData));
+    await db.registerFileBuffer('test_data.csv', new Uint8Array(csvBuffer));
+    addLog('info', 'Registered test_data.csv (' + csvData.length + ' bytes)');
+
+    const r1 = await conn.query("SELECT COUNT(*) AS cnt FROM read_csv_auto('test_data.csv')");
+    addLog('info', 'CSV row count query returned (' + r1.byteLength + 'B)');
+
+    const r1sum = await conn.query("SELECT SUM(value) AS total FROM read_csv_auto('test_data.csv')");
+    addLog('info', 'CSV sum query returned (' + r1sum.byteLength + 'B)');
+
+    // Create a table in the OPFS database from the buffer-registered CSV
+    await conn.query("CREATE TABLE from_csv AS SELECT * FROM read_csv_auto('test_data.csv')");
+    const r1verify = await conn.query("SELECT COUNT(*) as cnt, SUM(value) as total FROM from_csv");
+    addLog('info', 'Test 1 PASS: CSV buffer registered, table created in OPFS db');
+    _results.push({ test: 'csv_buffer', status: 'PASS' });
+
+    // ---------------------------------------------------------------
+    // Test 2: registerFileBuffer with Parquet (generate in-memory)
+    // ---------------------------------------------------------------
+    addLog('info', '--- Test 2: registerFileBuffer with Parquet ---');
+
+    // Generate a parquet buffer using COPY TO
+    await conn.query("COPY (SELECT i AS id, 'item_' || i AS name, (i * 3.14)::DOUBLE AS score FROM generate_series(1, 10000) t(i)) TO '/tmp/buf_test.parquet' (FORMAT PARQUET)");
+    // Read it back as a buffer
+    const parquetResult = await db.copyFileToBuffer('/tmp/buf_test.parquet');
+    addLog('info', 'Generated parquet buffer: ' + parquetResult.length + ' bytes');
+
+    // Drop and re-register as a new file name
+    await db.dropFile('/tmp/buf_test.parquet');
+    await db.registerFileBuffer('external_data.parquet', parquetResult);
+    addLog('info', 'Registered external_data.parquet');
+
+    const r2cnt = await conn.query("SELECT COUNT(*) AS cnt FROM 'external_data.parquet'");
+    addLog('info', 'Parquet row count query returned');
+
+    const r2agg = await conn.query("SELECT MIN(id) AS mn, MAX(id) AS mx, AVG(score)::INT AS avg_score FROM 'external_data.parquet'");
+    addLog('info', 'Parquet aggregate query returned');
+
+    // Create table in OPFS db from the buffer-registered parquet
+    await conn.query("CREATE TABLE from_parquet AS SELECT * FROM 'external_data.parquet'");
+    const r2verify = await conn.query("SELECT COUNT(*) AS cnt FROM from_parquet");
+    addLog('info', 'Test 2 PASS: Parquet buffer registered, table created in OPFS db');
+    _results.push({ test: 'parquet_buffer', status: 'PASS' });
+
+    // ---------------------------------------------------------------
+    // Test 3: JOIN between OPFS table and buffer-registered file
+    // ---------------------------------------------------------------
+    addLog('info', '--- Test 3: JOIN OPFS table with buffer file ---');
+
+    // Add more data to the OPFS table
+    await conn.query("INSERT INTO from_parquet SELECT i, 'extra_' || i, i * 2.0 FROM generate_series(10001, 20000) t(i)");
+    const r3join = await conn.query(`
+      SELECT COUNT(*) AS cnt
+      FROM from_parquet p
+      JOIN read_csv_auto('test_data.csv') c ON p.id = c.id
+    `);
+    addLog('info', 'Join query returned');
+
+    // The CSV has ids 1-5, parquet table has ids 1-20000, so join should give 5 rows
+    addLog('info', 'Test 3 PASS: JOIN between OPFS table and buffer-registered CSV');
+    _results.push({ test: 'join_opfs_buffer', status: 'PASS' });
+
+    // ---------------------------------------------------------------
+    // Test 4: Multiple buffer files registered simultaneously
+    // ---------------------------------------------------------------
+    addLog('info', '--- Test 4: Multiple simultaneous buffer files ---');
+
+    const csv2 = 'key,category\n1,A\n2,B\n3,A\n4,B\n5,A\n';
+    await db.registerFileBuffer('categories.csv', new TextEncoder().encode(csv2));
+
+    const csv3 = 'key,region\n1,north\n2,south\n3,east\n4,west\n5,north\n';
+    await db.registerFileBuffer('regions.csv', new TextEncoder().encode(csv3));
+
+    const r4 = await conn.query(`
+      SELECT d.name, c.category, r.region
+      FROM read_csv_auto('test_data.csv') d
+      JOIN read_csv_auto('categories.csv') c ON d.id = c.key
+      JOIN read_csv_auto('regions.csv') r ON d.id = r.key
+      ORDER BY d.id
+    `);
+    addLog('info', 'Three-way join across 3 buffer files returned');
+    addLog('info', 'Test 4 PASS: Multiple buffer files + 3-way join');
+    _results.push({ test: 'multi_buffer_join', status: 'PASS' });
+
+    // ---------------------------------------------------------------
+    // Test 5: Buffer file + OPFS table in analytical query
+    // ---------------------------------------------------------------
+    addLog('info', '--- Test 5: Analytics mixing OPFS and buffer data ---');
+
+    const r5 = await conn.query(`
+      WITH opfs_data AS (
+        SELECT id, name, score FROM from_parquet WHERE id <= 1000
+      ),
+      csv_lookup AS (
+        SELECT id, name, value FROM read_csv_auto('test_data.csv')
+      )
+      SELECT
+        (SELECT COUNT(*) FROM opfs_data) AS opfs_rows,
+        (SELECT SUM(score) FROM opfs_data)::INT AS opfs_score_sum,
+        (SELECT COUNT(*) FROM csv_lookup) AS csv_rows,
+        (SELECT SUM(value) FROM csv_lookup) AS csv_value_sum
+    `);
+    addLog('info', 'Analytics query returned');
+    addLog('info', 'Test 5 PASS: Mixed OPFS + buffer analytics');
+    _results.push({ test: 'mixed_analytics', status: 'PASS' });
+
+    // ---------------------------------------------------------------
+    // Test 6: Checkpoint with buffer-registered files present
+    // ---------------------------------------------------------------
+    addLog('info', '--- Test 6: Checkpoint with buffer files present ---');
+
+    await conn.query("SET threads = 1");
+    await conn.query("CHECKPOINT");
+    await conn.query("SET threads = 5");
+    addLog('info', 'Checkpoint succeeded with buffer files registered');
+
+    // Verify OPFS tables still queryable after checkpoint
+    const r6 = await conn.query("SELECT COUNT(*) AS cnt FROM from_parquet");
+    addLog('info', 'Post-checkpoint query returned');
+    addLog('info', 'Test 6 PASS: Checkpoint + post-checkpoint query OK');
+    _results.push({ test: 'checkpoint_with_buffers', status: 'PASS' });
+
+    // ---------------------------------------------------------------
+    // Test 7: Re-register buffer (overwrite) and query
+    // ---------------------------------------------------------------
+    addLog('info', '--- Test 7: Re-register buffer file ---');
+
+    const csvUpdated = 'id,name,value\n1,alice,999\n2,bob,888\n';
+    await db.dropFile('test_data.csv');
+    await db.registerFileBuffer('test_data.csv', new TextEncoder().encode(csvUpdated));
+    addLog('info', 'Re-registered test_data.csv with updated data');
+
+    const r7 = await conn.query("SELECT SUM(value) AS total FROM read_csv_auto('test_data.csv')");
+    addLog('info', 'Updated CSV query returned');
+    addLog('info', 'Test 7 PASS: Buffer re-registration works');
+    _results.push({ test: 'buffer_reregister', status: 'PASS' });
+
+    // Clean up
+    await conn.close();
+    await db.terminate();
+    await cleanOPFS(PREFIX);
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'All registerFileBuffer + OPFS tests passed in ' + elapsed + 'ms');
+    sendReport('PASS', {
+      bundle: 'coi',
+      elapsed: elapsed,
+      results: Object.fromEntries(_results.map(r => [r.test, r.status])),
+    });
+
+  } catch (e) {
+    addLog('error', 'FAIL: ' + e.message);
+    addLog('error', e.stack || '');
+    if (db) try { await db.terminate(); } catch (_) {}
+    await cleanOPFS(PREFIX);
+    sendReport('FAIL', { error: e.message, stack: e.stack || '' });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

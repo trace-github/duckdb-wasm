@@ -23,7 +23,7 @@ export function failWith(mod: DuckDBModule, msg: string): void {
 
 /** Copy a buffer */
 export function copyBuffer(mod: DuckDBModule, begin: number, length: number): Uint8Array {
-    const buffer = mod.HEAPU8.subarray(begin, begin + length);
+    const buffer = new Uint8Array(mod.HEAPU8.buffer, begin, length);
     const copy = new Uint8Array(new ArrayBuffer(buffer.byteLength));
     copy.set(buffer);
     return copy;
@@ -31,7 +31,7 @@ export function copyBuffer(mod: DuckDBModule, begin: number, length: number): Ui
 
 /** Decode a string */
 export function readString(mod: DuckDBModule, begin: number, length: number): string {
-    return decodeText(mod.HEAPU8.subarray(begin, begin + length));
+    return decodeText(new Uint8Array(mod.HEAPU8.buffer, begin, length));
 }
 
 /** The data protocol */

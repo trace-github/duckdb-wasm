@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html>
+<head><title>DuckDB-WASM Lua Extension Test</title></head>
+<body>
+<pre id="output">Starting lua test...</pre>
+<script>
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+</script>
+<script type="module">
+async function run() {
+  const t0 = Date.now();
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+
+    addLog('info', 'Importing module...');
+    const mod = await import('/dist/duckdb-wasm.mjs');
+    addLog('info', 'Module loaded (' + Object.keys(mod).length + ' exports)');
+
+    const { AsyncDuckDB, ConsoleLogger } = mod;
+
+    // Try EH → MVP bundle selection (no COI requirement)
+    const bundles = [
+      {
+        name: 'eh',
+        mainModule: '/dist/duckdb-eh.wasm',
+        mainWorker: '/dist/duckdb-browser-eh.worker.js',
+        pthreadWorker: null,
+      },
+      {
+        name: 'mvp',
+        mainModule: '/dist/duckdb-mvp.wasm',
+        mainWorker: '/dist/duckdb-browser-mvp.worker.js',
+        pthreadWorker: null,
+      },
+    ];
+
+    let db = null;
+    let chosenBundle = null;
+
+    for (const bundle of bundles) {
+      addLog('info', 'Trying ' + bundle.name + ' bundle...');
+      try {
+        const worker = new Worker(bundle.mainWorker);
+        const logger = new ConsoleLogger();
+        const candidate = new AsyncDuckDB(logger, worker);
+        await candidate.instantiate(bundle.mainModule);
+        db = candidate;
+        chosenBundle = bundle.name;
+        addLog('info', bundle.name + ' instantiated');
+        break;
+      } catch (e) {
+        addLog('info', bundle.name + ' failed: ' + e.message);
+      }
+    }
+
+    if (!db) throw new Error('All bundles failed to instantiate');
+
+    await db.open({});
+    addLog('info', 'Database opened (bundle: ' + chosenBundle + ')');
+
+    const conn = await db.connect();
+    addLog('info', 'Connected');
+
+    function bufText(buf) {
+      return new TextDecoder().decode(new Uint8Array(buf));
+    }
+
+    // Version
+    const v = await conn.query("SELECT version() AS v");
+    const vm = bufText(v).match(/v[\d.]+(-dev\d+)?/);
+    const version = vm ? vm[0] : 'unknown';
+    addLog('info', 'Version: ' + version);
+    _results.push({ label: 'version', value: version });
+    _results.push({ label: 'bundle', value: chosenBundle });
+
+    // Test 1: Basic arithmetic
+    addLog('info', 'Test 1: Basic arithmetic...');
+    const r1 = await conn.query("SELECT lua('return 40 + 2') AS result");
+    const r1text = bufText(r1);
+    if (!r1text.includes('42')) throw new Error('Expected 42, got: ' + r1text);
+    addLog('info', 'Test 1 PASSED: lua("return 40 + 2") => 42');
+    _results.push({ label: 'basic_arithmetic', value: 'OK' });
+
+    // Test 2: String concatenation with context
+    addLog('info', 'Test 2: String concatenation with context...');
+    const r2 = await conn.query("SELECT lua('return \"hello \" .. context', 'world') AS result");
+    const r2text = bufText(r2);
+    if (!r2text.includes('hello world')) throw new Error('Expected "hello world", got: ' + r2text);
+    addLog('info', 'Test 2 PASSED: lua(\'return "hello " .. context\', \'world\') => "hello world"');
+    _results.push({ label: 'string_concat', value: 'OK' });
+
+    // Test 3: Numeric context
+    addLog('info', 'Test 3: Numeric context...');
+    const r3 = await conn.query("SELECT lua('return context * 2', 21) AS result");
+    const r3text = bufText(r3);
+    if (!r3text.includes('42')) throw new Error('Expected 42, got: ' + r3text);
+    addLog('info', 'Test 3 PASSED: lua("return context * 2", 21) => 42');
+    _results.push({ label: 'numeric_context', value: 'OK' });
+
+    // Test 4: Float context
+    addLog('info', 'Test 4: Float context...');
+    const r4 = await conn.query("SELECT lua('return context + 0.5', 1.5) AS result");
+    const r4text = bufText(r4);
+    if (!r4text.includes('2')) throw new Error('Expected 2.0, got: ' + r4text);
+    addLog('info', 'Test 4 PASSED: lua("return context + 0.5", 1.5) => 2.0');
+    _results.push({ label: 'float_context', value: 'OK' });
+
+    // Test 5: Boolean
+    addLog('info', 'Test 5: Boolean result...');
+    const r5 = await conn.query("SELECT lua('return 10 > 5') AS result");
+    const r5text = bufText(r5);
+    if (!r5text.includes('true')) throw new Error('Expected true, got: ' + r5text);
+    addLog('info', 'Test 5 PASSED: boolean expression works');
+    _results.push({ label: 'boolean', value: 'OK' });
+
+    // Test 6: JSON context (must cast to JSON type to use the dkjson overload)
+    addLog('info', 'Test 6: JSON context (table input)...');
+    const r6 = await conn.query(`SELECT lua('return context.x + context.y', '{"x": 10, "y": 32}'::JSON) AS result`);
+    const r6text = bufText(r6);
+    if (!r6text.includes('42')) throw new Error('Expected 42, got: ' + r6text);
+    addLog('info', 'Test 6 PASSED: JSON context context.x + context.y => 42');
+    _results.push({ label: 'json_context', value: 'OK' });
+
+    // Test 7: Lua string library (available without filesystem)
+    addLog('info', 'Test 7: Lua string library...');
+    const r7 = await conn.query("SELECT lua('return string.upper(context)', 'hello') AS result");
+    const r7text = bufText(r7);
+    if (!r7text.includes('HELLO')) throw new Error('Expected HELLO, got: ' + r7text);
+    addLog('info', 'Test 7 PASSED: string.upper(context) => HELLO');
+    _results.push({ label: 'string_lib', value: 'OK' });
+
+    // Test 8: Lua math library
+    addLog('info', 'Test 8: Lua math library...');
+    const r8 = await conn.query("SELECT lua('return math.floor(context)', 3.7) AS result");
+    const r8text = bufText(r8);
+    if (!r8text.includes('3')) throw new Error('Expected 3, got: ' + r8text);
+    addLog('info', 'Test 8 PASSED: math.floor(3.7) => 3');
+    _results.push({ label: 'math_lib', value: 'OK' });
+
+    // Test 9: Multi-row with generate_series
+    // Cast to VARCHAR to avoid BIGINT vs JSON overload ambiguity in DuckDB 1.4.4.
+    // tonumber() in Lua converts the string context back to a number.
+    addLog('info', 'Test 9: Multi-row with generate_series...');
+    const r9 = await conn.query(
+      "SELECT i, lua('return tonumber(context)^2', i::VARCHAR) AS sq FROM generate_series(1, 10) t(i)"
+    );
+    const r9text = bufText(r9);
+    if (!r9text.includes('100')) throw new Error('Expected 100 (10^2) in results, got: ' + r9text);
+    addLog('info', 'Test 9 PASSED: 10-row lua squaring completed');
+    _results.push({ label: 'multi_row', value: 'OK' });
+
+    // Test 10: JSON round-trip — receive JSON, modify it, return modified JSON
+    addLog('info', 'Test 10: JSON round-trip (modify and return JSON)...');
+    const r10rt = await conn.query(`
+      SELECT lua(
+        'context.score = context.score * 2; context.label = string.upper(context.label); return context',
+        '{"score": 21, "label": "hello"}'::JSON
+      ) AS result
+    `);
+    const r10rtText = bufText(r10rt);
+    if (!r10rtText.includes('42') || !r10rtText.includes('HELLO')) {
+      throw new Error('Expected score=42 and label=HELLO in JSON result, got: ' + r10rtText);
+    }
+    addLog('info', 'Test 10 PASSED: JSON round-trip — score doubled to 42, label uppercased to HELLO');
+    _results.push({ label: 'json_roundtrip', value: 'OK' });
+
+    // Test 11: JSON round-trip with multi-row.
+    // NOTE: dkjson treats the field name 'n' as a special array-length hint
+    // ({n=k} encodes as an array of k nulls). Use a different field name.
+    addLog('info', 'Test 11: JSON round-trip multi-row...');
+    const r11 = await conn.query(`
+      SELECT lua(
+        'context.val = context.val * context.val; return context',
+        ('{"val":' || i::VARCHAR || '}')::JSON
+      ) AS result
+      FROM generate_series(1, 5) t(i)
+    `);
+    const r11text = bufText(r11);
+    if (!r11text.includes('25')) throw new Error('Expected 25 (5^2) in JSON multi-row result, got: ' + r11text);
+    addLog('info', 'Test 11 PASSED: JSON multi-row round-trip — 5 rows, 5^2=25 present');
+    _results.push({ label: 'json_roundtrip_multirow', value: 'OK' });
+
+    // Test 12: json.encode / json.decode available in all overloads
+    addLog('info', 'Test 12: json.encode and json.decode in Lua scripts...');
+    // No-arg overload: encode a table to JSON string
+    const r12a = await conn.query(`SELECT lua('return json.encode({x=1, y=2})') AS result`);
+    const r12aText = bufText(r12a);
+    if (!r12aText.includes('"x"') || !r12aText.includes('"y"')) {
+      throw new Error('json.encode failed, got: ' + r12aText);
+    }
+    addLog('info', 'Test 12a PASSED: json.encode({x=1,y=2}) works in no-context overload');
+
+    // VARCHAR overload: decode a JSON string passed as context, then re-encode
+    const r12b = await conn.query(`SELECT lua('local t = json.decode(context); t.z = 3; return json.encode(t)', '{"x":1,"y":2}') AS result`);
+    const r12bText = bufText(r12b);
+    if (!r12bText.includes('"z"') || !r12bText.includes('3')) {
+      throw new Error('json.decode in varchar overload failed, got: ' + r12bText);
+    }
+    addLog('info', 'Test 12b PASSED: json.decode/encode in varchar overload — added z=3');
+    _results.push({ label: 'json_global', value: 'OK' });
+
+    // Test 13: Error handling (invalid Lua — extension returns error string, not a throw)
+    addLog('info', 'Test 13: Error handling (invalid Lua)...');
+    const r13 = await conn.query("SELECT lua('this is not valid lua @@@') AS result");
+    // Extension returns the Lua error as the result string rather than throwing
+    addLog('info', 'Test 13 PASSED: error expression returned result (' + r13.byteLength + 'B)');
+    _results.push({ label: 'error_handling', value: 'OK' });
+
+    await conn.close();
+    await db.terminate();
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'All 13 lua tests passed in ' + elapsed + 'ms');
+    sendReport('PASS', { elapsed: elapsed, bundle: chosenBundle });
+
+  } catch (e) {
+    addLog('error', 'FAILED: ' + e.message);
+    addLog('error', e.stack || '');
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message, stack: e.stack || '' });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

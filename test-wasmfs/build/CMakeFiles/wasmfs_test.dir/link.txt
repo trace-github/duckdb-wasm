@@ -1,0 +1,1 @@
+/opt/emsdk/upstream/emscripten/emcc -O3 -DNDEBUG -sWASMFS -lopfs.js -sALLOW_MEMORY_GROWTH=1 -sMODULARIZE=1 -sEXPORT_NAME=WasmFSTest -sEXPORTED_RUNTIME_METHODS=callMain -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 -O2 -pthread -sPTHREAD_POOL_SIZE=8 @CMakeFiles/wasmfs_test.dir/objects1 -o wasmfs_test.js 

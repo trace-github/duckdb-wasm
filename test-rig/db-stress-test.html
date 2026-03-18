@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html>
+<head><title>DuckDB-WASM OPFS Database Stress Test (5 threads)</title></head>
+<body>
+<pre id="output">Starting OPFS database stress test...</pre>
+<script>
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+
+setTimeout(function() {
+  addLog('error', 'SAFETY TIMEOUT: no report after 100s');
+  sendReport('FAIL', { error: 'Safety timeout - test hung', elapsed: 100000 });
+}, 100000);
+</script>
+<script type="module">
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT after ' + ms + 'ms in: ' + label)), ms))
+  ]);
+}
+
+function findInt32InArrow(buf, target) {
+  const bytes = new Uint8Array(buf);
+  const abuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const view = new DataView(abuf);
+  for (let i = 0; i <= bytes.length - 4; i++) {
+    if (view.getInt32(i, true) === target) return true;
+  }
+  return false;
+}
+
+async function cleanOPFS(prefix) {
+  try {
+    const root = await navigator.storage.getDirectory();
+    for await (const [name] of root.entries()) {
+      if (name.startsWith(prefix)) {
+        try { await root.removeEntry(name); } catch (e) { /* locked */ }
+      }
+    }
+  } catch (e) { /* */ }
+}
+
+async function listOPFS(prefix) {
+  const entries = [];
+  try {
+    const root = await navigator.storage.getDirectory();
+    for await (const [name, handle] of root.entries()) {
+      if (!prefix || name.startsWith(prefix)) {
+        let size = '?';
+        if (handle.kind === 'file') {
+          try { const f = await handle.getFile(); size = f.size; } catch (e) { size = 'locked'; }
+        }
+        entries.push(name + ' (' + size + 'B)');
+      }
+    }
+  } catch (e) { /* */ }
+  return entries;
+}
+
+function formatBytes(n) {
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+  return n + ' B';
+}
+
+async function run() {
+  const t0 = Date.now();
+  const RUN_ID = Date.now().toString(36);
+  const PREFIX = 'dbstress_' + RUN_ID + '_';
+  let db = null;
+
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    if (!crossOriginIsolated) throw new Error('CrossOriginIsolated required');
+
+    await cleanOPFS('dbstress_');
+    const priorFiles = await listOPFS('dbstress_');
+    addLog('info', 'OPFS after clean: ' + (priorFiles.length ? priorFiles.join(', ') : '(empty)'));
+
+    addLog('info', 'Importing module...');
+    const mod = await import('/dist/duckdb-wasm.mjs');
+    const { AsyncDuckDB, ConsoleLogger } = mod;
+
+    const bundleConfig = {
+      mainModule: '/dist/duckdb-coi.wasm',
+      mainWorker: '/dist/duckdb-browser-coi.worker.js',
+      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    };
+
+    const logger = new ConsoleLogger();
+    const worker = new Worker(bundleConfig.mainWorker);
+    worker.onerror = (e) => addLog('error', 'Worker error: ' + (e.message || e));
+    db = new AsyncDuckDB(logger, worker);
+    await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+    addLog('info', 'COI bundle instantiated');
+
+    const dbName = PREFIX + 'main.db';
+    await db.open({
+      path: 'opfs://' + dbName,
+      accessMode: 3,
+      maximumThreads: 5,
+    });
+    addLog('info', 'Database opened on OPFS with maximumThreads=5: ' + dbName);
+
+    const conn = await db.connect();
+
+    // Disable auto-checkpoint to prevent WAL→DB flush deadlock with pthreads
+    await conn.query("SET wal_autocheckpoint = '1TB'");
+    addLog('info', 'Auto-checkpoint disabled (WAL-only mode)');
+
+    // =============================================
+    // TEST 1: Create a large table
+    // =============================================
+    addLog('info', '--- Test 1: Create large table (500K rows) ---');
+    const TOTAL_ROWS = 500000;
+    const t1 = Date.now();
+
+    await withTimeout(conn.query(`
+      CREATE TABLE stress_data AS
+      SELECT
+        i AS id,
+        'user_' || (i % 10000)::VARCHAR AS username,
+        (random() * 1000)::DOUBLE AS score,
+        (i % 50)::INTEGER AS department,
+        (random() * 100000)::INTEGER AS salary,
+        ('2024-01-01'::DATE + (i % 365)::INTEGER)::VARCHAR AS hire_date,
+        repeat('x', 20 + (i % 80)) AS notes
+      FROM generate_series(0, ${TOTAL_ROWS - 1}) t(i)
+    `), 30000, 'T1 create table');
+
+    const countResult = await withTimeout(
+      conn.query("SELECT count(*)::INTEGER AS n FROM stress_data"),
+      15000, 'T1 count'
+    );
+    if (!findInt32InArrow(countResult, TOTAL_ROWS)) {
+      throw new Error('Test 1: row count mismatch');
+    }
+
+    const elapsed1 = Date.now() - t1;
+    addLog('info', 'Test 1 PASS: created ' + TOTAL_ROWS + ' rows (' + elapsed1 + 'ms)');
+    _results.push({ label: 'create_table', value: TOTAL_ROWS + ' rows (' + elapsed1 + 'ms)' });
+
+    const filesAfterCreate = await listOPFS(PREFIX);
+    addLog('info', 'OPFS files: ' + filesAfterCreate.join(', '));
+
+    // =============================================
+    // TEST 2: Sequential reads — various query patterns
+    // =============================================
+    addLog('info', '--- Test 2: Sequential read queries ---');
+    const t2 = Date.now();
+
+    const readQueries = [
+      "SELECT count(*)::INTEGER AS n FROM stress_data",
+      "SELECT department, count(*)::INTEGER AS n, avg(score)::DOUBLE AS avg_score FROM stress_data GROUP BY department ORDER BY department LIMIT 10",
+      "SELECT username, sum(salary)::BIGINT AS total_sal FROM stress_data GROUP BY username ORDER BY total_sal DESC LIMIT 20",
+      "SELECT count(*)::INTEGER AS n FROM stress_data WHERE score > 500 AND department < 25",
+      "SELECT department, min(salary)::INTEGER AS mn, max(salary)::INTEGER AS mx FROM stress_data GROUP BY department HAVING count(*) > 5000 ORDER BY department",
+      "SELECT count(DISTINCT username)::INTEGER AS n FROM stress_data",
+    ];
+
+    for (let i = 0; i < readQueries.length; i++) {
+      const r = await withTimeout(conn.query(readQueries[i]), 15000, 'T2 query ' + i);
+      if (r.byteLength < 10) throw new Error('Test 2: query ' + i + ' returned empty');
+    }
+
+    const elapsed2 = Date.now() - t2;
+    addLog('info', 'Test 2 PASS: ' + readQueries.length + ' read queries (' + elapsed2 + 'ms)');
+    _results.push({ label: 'sequential_reads', value: readQueries.length + ' queries (' + elapsed2 + 'ms)' });
+
+    // =============================================
+    // TEST 3: Writes — INSERT more rows into the table
+    // =============================================
+    addLog('info', '--- Test 3: Write operations (INSERT batches) ---');
+    const t3 = Date.now();
+    const BATCH_SIZE = 50000;
+    const NUM_BATCHES = 4;
+
+    for (let batch = 0; batch < NUM_BATCHES; batch++) {
+      const offset = TOTAL_ROWS + batch * BATCH_SIZE;
+      await withTimeout(conn.query(`
+        INSERT INTO stress_data
+        SELECT
+          i AS id,
+          'user_' || (i % 10000)::VARCHAR AS username,
+          (random() * 1000)::DOUBLE AS score,
+          (i % 50)::INTEGER AS department,
+          (random() * 100000)::INTEGER AS salary,
+          ('2024-01-01'::DATE + (i % 365)::INTEGER)::VARCHAR AS hire_date,
+          repeat('x', 20 + (i % 80)) AS notes
+        FROM generate_series(${offset}, ${offset + BATCH_SIZE - 1}) t(i)
+      `), 60000, 'T3 insert batch ' + batch);
+      addLog('info', 'T3 batch ' + batch + ': inserted ' + BATCH_SIZE + ' rows');
+    }
+
+    const expectedTotal = TOTAL_ROWS + NUM_BATCHES * BATCH_SIZE;
+    const postInsertCount = await withTimeout(
+      conn.query("SELECT count(*)::INTEGER AS n FROM stress_data"),
+      15000, 'T3 count'
+    );
+    if (!findInt32InArrow(postInsertCount, expectedTotal)) {
+      throw new Error('Test 3: expected ' + expectedTotal + ' rows after inserts');
+    }
+
+    const elapsed3 = Date.now() - t3;
+    addLog('info', 'Test 3 PASS: ' + (NUM_BATCHES * BATCH_SIZE) + ' rows inserted (' + elapsed3 + 'ms)');
+    _results.push({ label: 'batch_inserts', value: (NUM_BATCHES * BATCH_SIZE) + ' rows in ' + NUM_BATCHES + ' batches (' + elapsed3 + 'ms)' });
+
+    // =============================================
+    // TEST 4: Interleaved reads and writes
+    // =============================================
+    addLog('info', '--- Test 4: Interleaved read/write ---');
+    const t4 = Date.now();
+    const INTERLEAVE_ROUNDS = 6;
+    let rowCounter = expectedTotal;
+
+    for (let i = 0; i < INTERLEAVE_ROUNDS; i++) {
+      if (i % 2 === 0) {
+        // Write round
+        await withTimeout(conn.query(`
+          INSERT INTO stress_data
+          SELECT
+            i AS id, 'batch_' || ${i}::VARCHAR AS username,
+            (random() * 500)::DOUBLE AS score, ${i} AS department,
+            (random() * 50000)::INTEGER AS salary,
+            '2025-01-01' AS hire_date, 'round_${i}' AS notes
+          FROM generate_series(${rowCounter}, ${rowCounter + 9999}) t(i)
+        `), 15000, 'T4 write ' + i);
+        rowCounter += 10000;
+      } else {
+        // Read round
+        const r = await withTimeout(conn.query(`
+          SELECT department, count(*)::INTEGER AS n, avg(score)::DOUBLE AS avg_score
+          FROM stress_data
+          GROUP BY department
+          ORDER BY n DESC
+          LIMIT 10
+        `), 15000, 'T4 read ' + i);
+        if (r.byteLength < 10) throw new Error('Test 4: read round ' + i + ' empty');
+      }
+      addLog('info', 'T4 round ' + i + ' (' + (i % 2 === 0 ? 'write' : 'read') + ') OK');
+    }
+
+    const elapsed4 = Date.now() - t4;
+    addLog('info', 'Test 4 PASS: ' + INTERLEAVE_ROUNDS + ' interleaved rounds (' + elapsed4 + 'ms)');
+    _results.push({ label: 'interleaved_rw', value: INTERLEAVE_ROUNDS + ' rounds (' + elapsed4 + 'ms)' });
+
+    // =============================================
+    // TEST 5: Heavy analytical queries on the large table
+    // =============================================
+    addLog('info', '--- Test 5: Heavy analytical queries ---');
+    const t5 = Date.now();
+
+    const heavyQueries = [
+      // Window function
+      "SELECT department, username, score, rank() OVER (PARTITION BY department ORDER BY score DESC) AS rnk FROM stress_data WHERE department < 5 LIMIT 50",
+      // Self-join
+      "SELECT a.department, count(*)::INTEGER AS pairs FROM stress_data a JOIN stress_data b ON a.department = b.department AND a.id < b.id WHERE a.department = 0 AND a.id < 1000 AND b.id < 1000 GROUP BY a.department",
+      // Subquery with aggregation
+      "SELECT count(*)::INTEGER AS n FROM stress_data WHERE score > (SELECT avg(score) FROM stress_data)",
+      // Multiple aggregations
+      "SELECT department, count(*)::INTEGER AS n, avg(score)::DOUBLE AS avg_s, stddev(score)::DOUBLE AS std_s, min(salary)::INTEGER AS min_sal, max(salary)::INTEGER AS max_sal, avg(salary)::DOUBLE AS avg_sal FROM stress_data GROUP BY department ORDER BY department",
+      // UNION query
+      "SELECT 'high' AS tier, count(*)::INTEGER AS n FROM stress_data WHERE score > 750 UNION ALL SELECT 'mid', count(*)::INTEGER FROM stress_data WHERE score BETWEEN 250 AND 750 UNION ALL SELECT 'low', count(*)::INTEGER FROM stress_data WHERE score < 250",
+    ];
+
+    for (let i = 0; i < heavyQueries.length; i++) {
+      const r = await withTimeout(conn.query(heavyQueries[i]), 30000, 'T5 heavy ' + i);
+      if (r.byteLength < 10) throw new Error('Test 5: heavy query ' + i + ' empty');
+      addLog('info', 'T5 heavy query ' + i + ' OK');
+    }
+
+    const elapsed5 = Date.now() - t5;
+    addLog('info', 'Test 5 PASS: ' + heavyQueries.length + ' heavy queries (' + elapsed5 + 'ms)');
+    _results.push({ label: 'heavy_analytics', value: heavyQueries.length + ' queries (' + elapsed5 + 'ms)' });
+
+    // =============================================
+    // TEST 6: UPDATE and DELETE operations
+    // =============================================
+    addLog('info', '--- Test 6: UPDATE and DELETE ---');
+    const t6 = Date.now();
+
+    await withTimeout(conn.query(
+      "UPDATE stress_data SET score = score * 1.1 WHERE department = 0"
+    ), 15000, 'T6 update');
+    addLog('info', 'T6: UPDATE done');
+
+    await withTimeout(conn.query(
+      "DELETE FROM stress_data WHERE department = 49"
+    ), 15000, 'T6 delete');
+    addLog('info', 'T6: DELETE done');
+
+    const postModCount = await withTimeout(
+      conn.query("SELECT count(*)::INTEGER AS n FROM stress_data WHERE department = 49"),
+      15000, 'T6 verify delete'
+    );
+    if (!findInt32InArrow(postModCount, 0)) {
+      throw new Error('Test 6: department 49 should have 0 rows after DELETE');
+    }
+
+    const elapsed6 = Date.now() - t6;
+    addLog('info', 'Test 6 PASS: UPDATE + DELETE (' + elapsed6 + 'ms)');
+    _results.push({ label: 'update_delete', value: 'OK (' + elapsed6 + 'ms)' });
+
+    // =============================================
+    // TEST 7: Single-thread checkpoint, then resume multi-thread
+    // Drop to 1 thread, CHECKPOINT (flush WAL → DB), restore threads, query again
+    // =============================================
+    addLog('info', '--- Test 7: Single-thread checkpoint cycle ---');
+    const t7 = Date.now();
+
+    // Snapshot OPFS sizes before checkpoint
+    const preCheckpointFiles = await listOPFS(PREFIX);
+    addLog('info', 'T7 before checkpoint: ' + preCheckpointFiles.join(', '));
+
+    // Count rows before checkpoint
+    const preCount = await withTimeout(
+      conn.query("SELECT count(*)::INTEGER AS n FROM stress_data"),
+      15000, 'T7 pre-count'
+    );
+    addLog('info', 'T7 pre-checkpoint row count OK');
+
+    // Drop to single thread
+    await withTimeout(conn.query("SET threads = 1"), 5000, 'T7 set threads=1');
+    addLog('info', 'T7: threads set to 1');
+
+    // CHECKPOINT — this is what deadlocks with multiple threads
+    await withTimeout(conn.query("CHECKPOINT"), 30000, 'T7 checkpoint');
+    addLog('info', 'T7: CHECKPOINT completed!');
+
+    // Check OPFS sizes after — main DB should be larger, WAL should be small/empty
+    const postCheckpointFiles = await listOPFS(PREFIX);
+    addLog('info', 'T7 after checkpoint: ' + postCheckpointFiles.join(', '));
+
+    // Restore multi-thread
+    await withTimeout(conn.query("SET threads = 5"), 5000, 'T7 set threads=5');
+    addLog('info', 'T7: threads restored to 5');
+
+    // Verify data is still intact after checkpoint
+    const postCount = await withTimeout(
+      conn.query("SELECT count(*)::INTEGER AS n FROM stress_data"),
+      15000, 'T7 post-count'
+    );
+    addLog('info', 'T7: post-checkpoint row count OK');
+
+    // Run a heavy query to confirm multi-thread still works
+    const postHeavy = await withTimeout(conn.query(`
+      SELECT department, count(*)::INTEGER AS n, avg(score)::DOUBLE AS avg_s
+      FROM stress_data
+      GROUP BY department
+      ORDER BY n DESC
+      LIMIT 10
+    `), 15000, 'T7 post-checkpoint query');
+    if (postHeavy.byteLength < 10) throw new Error('Test 7: post-checkpoint query empty');
+
+    const elapsed7 = Date.now() - t7;
+    addLog('info', 'Test 7 PASS: checkpoint + resume (' + elapsed7 + 'ms)');
+    _results.push({ label: 'checkpoint_cycle', value: 'OK (' + elapsed7 + 'ms)' });
+
+    // =============================================
+    // TEST 8: Second write+checkpoint cycle to confirm repeatability
+    // =============================================
+    addLog('info', '--- Test 8: Second write + checkpoint cycle ---');
+    const t8 = Date.now();
+
+    // Insert more data (multi-threaded)
+    await withTimeout(conn.query(`
+      INSERT INTO stress_data
+      SELECT i AS id, 'post_ckpt_' || i::VARCHAR AS username,
+        (random() * 500)::DOUBLE AS score, 99 AS department,
+        (random() * 50000)::INTEGER AS salary,
+        '2025-06-01' AS hire_date, 'after_checkpoint' AS notes
+      FROM generate_series(0, 49999) t(i)
+    `), 15000, 'T8 insert');
+    addLog('info', 'T8: inserted 50K rows (multi-threaded)');
+
+    // Drop to 1 thread, checkpoint again
+    await withTimeout(conn.query("SET threads = 1"), 5000, 'T8 set threads=1');
+    await withTimeout(conn.query("CHECKPOINT"), 30000, 'T8 checkpoint');
+    addLog('info', 'T8: second CHECKPOINT completed');
+
+    // Restore and verify
+    await withTimeout(conn.query("SET threads = 5"), 5000, 'T8 set threads=5');
+    const dept99 = await withTimeout(
+      conn.query("SELECT count(*)::INTEGER AS n FROM stress_data WHERE department = 99"),
+      15000, 'T8 verify'
+    );
+    if (!findInt32InArrow(dept99, 50000)) {
+      throw new Error('Test 8: expected 50000 rows in department 99');
+    }
+
+    const finalFiles = await listOPFS(PREFIX);
+    addLog('info', 'T8 final OPFS: ' + finalFiles.join(', '));
+
+    const elapsed8 = Date.now() - t8;
+    addLog('info', 'Test 8 PASS: write + checkpoint + verify (' + elapsed8 + 'ms)');
+    _results.push({ label: 'second_checkpoint', value: 'OK (' + elapsed8 + 'ms)' });
+    _results.push({ label: 'final_opfs', value: finalFiles.join(', ') });
+
+    await conn.close();
+    await db.terminate();
+    db = null;
+
+    await cleanOPFS(PREFIX);
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'All OPFS database stress tests passed in ' + elapsed + 'ms');
+    sendReport('PASS', { elapsed: elapsed, bundle: 'coi' });
+
+  } catch (e) {
+    addLog('error', 'FAILED: ' + e.message);
+    addLog('error', e.stack);
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message, stack: e.stack });
+    if (db) try { await db.terminate(); } catch (x) { /* */ }
+    await cleanOPFS(PREFIX);
+  }
+}
+
+run();
+</script>
+</body>
+</html>

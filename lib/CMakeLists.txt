@@ -135,7 +135,7 @@ if(EMSCRIPTEN)
   if(WITH_WASM_THREADS)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -sUSE_PTHREADS=1 -DWEBDB_THREADS=1")
     set(DUCKDB_CXX_FLAGS "${CMAKE_CXX_FLAGS} -sUSE_PTHREADS=1")
-    set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -sUSE_PTHREADS=1 -sPTHREAD_POOL_SIZE=4 -pthread")
+    set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -sUSE_PTHREADS=1 -sPTHREAD_POOL_SIZE=4 -pthread -sWASMFS -lopfs.js")
     set(DUCKDB_PLATFORM "wasm_threads")
   else()
     set(CMAKE_CXX_FLAGS
@@ -160,7 +160,10 @@ if (DUCKDB_WASM_LOADABLE_EXTENSIONS)
     set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -s MAIN_MODULE=1 -s EXPORTED_FUNCTIONS='@../../../lib/base_exported_list.txt'")
   endif()
 else()
-  set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -s FILESYSTEM=0 -s ENVIRONMENT='web,node,worker' -s EXPORTED_FUNCTIONS='@../../../lib/base_exported_list.txt'")
+  if(NOT WITH_WASM_THREADS)
+    set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -s FILESYSTEM=0")
+  endif()
+  set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -s ENVIRONMENT='web,node,worker' -s EXPORTED_FUNCTIONS='@../../../lib/base_exported_list.txt'")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -182,6 +185,7 @@ include("${CMAKE_SOURCE_DIR}/cmake/gflags.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/googletest.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/rapidjson.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/evalexpr_rhai.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/lua.cmake")
 
 # ---------------------------------------------------------------------------
 # Code coverage
@@ -231,6 +235,7 @@ add_library(
   ${CMAKE_SOURCE_DIR}/src/io/glob.cc
   ${CMAKE_SOURCE_DIR}/src/io/ifstream.cc
   ${CMAKE_SOURCE_DIR}/src/io/memory_filesystem.cc
+  ${CMAKE_SOURCE_DIR}/src/io/wasmfs_filesystem.cc
   ${CMAKE_SOURCE_DIR}/src/io/web_filesystem.cc
   ${CMAKE_SOURCE_DIR}/src/json_analyzer.cc
   ${CMAKE_SOURCE_DIR}/src/json_dataview.cc
@@ -283,13 +288,23 @@ else()
   target_include_directories(duckdb_web_evalexpr_rhai PRIVATE
     ${CMAKE_SOURCE_DIR}/../submodules/evalexpr_rhai/src/include)
 
-  target_link_libraries(duckdb_web duckdb duckdb_web_parquet duckdb_web_json duckdb_web_icu duckdb_web_tpcds duckdb_web_tpch duckdb_web_evalexpr_rhai arrow rapidjson ${THREAD_LIBS})
+  add_library(
+    duckdb_web_lua
+    ${CMAKE_SOURCE_DIR}/src/extensions/lua_extension.cc
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb_lua/src/lua_extension.cpp)
+
+  target_include_directories(duckdb_web_lua PRIVATE
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb_lua/src/include
+    ${CMAKE_SOURCE_DIR}/../submodules/lua)
+
+  target_link_libraries(duckdb_web duckdb duckdb_web_parquet duckdb_web_json duckdb_web_icu duckdb_web_tpcds duckdb_web_tpch duckdb_web_evalexpr_rhai duckdb_web_lua arrow rapidjson ${THREAD_LIBS})
   target_link_libraries(duckdb_web_parquet duckdb duckdb_parquet)
   target_link_libraries(duckdb_web_json duckdb duckdb_json)
   target_link_libraries(duckdb_web_icu duckdb duckdb_icu)
   target_link_libraries(duckdb_web_tpcds duckdb duckdb_tpcds)
   target_link_libraries(duckdb_web_tpch duckdb duckdb_tpch)
   target_link_libraries(duckdb_web_evalexpr_rhai duckdb evalexpr_rhai_rust)
+  target_link_libraries(duckdb_web_lua duckdb lua_c_lib)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -300,6 +315,9 @@ endif()
      # --pre-js "/Users/carlo/databricks/duckdb_delta/file_system_packager.js" \
 #
 if(EMSCRIPTEN)
+  if(WITH_WASM_THREADS)
+    target_compile_definitions(duckdb_web PRIVATE DUCKDB_WASMFS=1)
+  endif()
   add_executable(duckdb_wasm ${CMAKE_SOURCE_DIR}/src/wasm_main.cc)
   target_link_libraries(duckdb_wasm duckdb_web ${THREAD_LIBS})
   message(STATUS "WASM_LINK_FLAGS=${WASM_LINK_FLAGS}")
