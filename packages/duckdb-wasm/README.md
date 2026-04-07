@@ -1,23 +1,19 @@
-<img src="https://raw.githubusercontent.com/duckdb/duckdb-wasm/main/misc/duckdb_wasm.svg" height="64">
+# trace-duckdb-wasm
 
-[![Main](https://github.com/duckdb/duckdb-wasm/actions/workflows/main.yml/badge.svg)](https://github.com/duckdb/duckdb-wasm/actions/workflows/main.yml)
-[![Benchmarks](https://github.com/duckdb/duckdb-wasm/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/duckdb/duckdb-wasm/actions/workflows/benchmarks.yml)
-[![duckdb](https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@latest/dist/img/duckdb_version_badge.svg)](https://github.com/duckdb/duckdb)
-[![npm](https://img.shields.io/npm/v/@duckdb/duckdb-wasm?logo=npm)](https://www.npmjs.com/package/@duckdb/duckdb-wasm/v/latest)
-[![JSDevlivr](https://data.jsdelivr.com/v1/package/npm/@duckdb/duckdb-wasm/badge?style=rounded)](https://www.jsdelivr.com/package/npm/@duckdb/duckdb-wasm)
+This is a custom build of DuckDB-WASM with modifications specific to our needs, but may serve as an example of how to build your own. Claude was heavily involved, so the Claude files are included to help in the future.
 
-**DuckDB-Wasm**
+**What's different from the standard DuckDB-WASM package:**
 
-DuckDB-Wasm is an in-process analytical SQL database for the browser. It is powered by WebAssembly, speaks Arrow fluently, reads Parquet, CSV and JSON files backed by Filesystem APIs or HTTP requests and has been tested with Chrome, Firefox, Safari and Node.js. Read the [launch blog post](https://duckdb.org/2021/10/29/duckdb-wasm.html).
+- **WasmFS** — added to support multiple threads reading files concurrently
+- **Statically linked extensions** — JSON and other extensions are linked directly into the WASM binary, fixing the issue where they fail to load in the standard package when running with multiple threads
+- **Custom Rust extension** — a hashing extension for JSON values for increased performance (specific to our needs but may serve as a decent example of how to write one)
 
-Try it out at [shell.duckdb.org](https://shell.duckdb.org) and on [Observable](https://observablehq.com/@cmudig/duckdb) and read the [API documentation](https://shell.duckdb.org/docs/modules/index.html).
-
-_DuckDB-Wasm is fast! If you're here for performance numbers, head over to [our benchmarks](https://shell.duckdb.org/versus)._
+The source is available at [github.com/run-trace/duckdb-wasm](https://github.com/trace-github/duckdb-wasm).
 
 ## Instantiation
 cdn(jsdelivr)  
 ```ts
-import * as duckdb from '@duckdb/duckdb-wasm';
+import * as duckdb from '@run-trace/duckdb-wasm';
 
 const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
 
@@ -38,17 +34,17 @@ URL.revokeObjectURL(worker_url);
 
 webpack  
 ```ts
-import * as duckdb from '@duckdb/duckdb-wasm';
-import duckdb_wasm from '@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm';
-import duckdb_wasm_next from '@duckdb/duckdb-wasm/dist/duckdb-eh.wasm';
+import * as duckdb from '@run-trace/duckdb-wasm';
+import duckdb_wasm from '@run-trace/duckdb-wasm/dist/duckdb-mvp.wasm';
+import duckdb_wasm_next from '@run-trace/duckdb-wasm/dist/duckdb-eh.wasm';
 const MANUAL_BUNDLES: duckdb.DuckDBBundles = {
     mvp: {
         mainModule: duckdb_wasm,
-        mainWorker: new URL('@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js', import.meta.url).toString(),
+        mainWorker: new URL('@run-trace/duckdb-wasm/dist/duckdb-browser-mvp.worker.js', import.meta.url).toString(),
     },
     eh: {
         mainModule: duckdb_wasm_next,
-        mainWorker: new URL('@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js', import.meta.url).toString(),
+        mainWorker: new URL('@run-trace/duckdb-wasm/dist/duckdb-browser-eh.worker.js', import.meta.url).toString(),
     },
 };
 // Select a bundle based on browser checks
@@ -61,11 +57,11 @@ await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
 ```
 vite  
 ```ts
-import * as duckdb from '@duckdb/duckdb-wasm';
-import duckdb_wasm from '@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url';
-import mvp_worker from '@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?url';
-import duckdb_wasm_eh from '@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url';
-import eh_worker from '@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url';
+import * as duckdb from '@run-trace/duckdb-wasm';
+import duckdb_wasm from '@run-trace/duckdb-wasm/dist/duckdb-mvp.wasm?url';
+import mvp_worker from '@run-trace/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?url';
+import duckdb_wasm_eh from '@run-trace/duckdb-wasm/dist/duckdb-eh.wasm?url';
+import eh_worker from '@run-trace/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url';
 
 const MANUAL_BUNDLES: duckdb.DuckDBBundles = {
     mvp: {
@@ -85,9 +81,9 @@ const logger = new duckdb.ConsoleLogger();
 const db = new duckdb.AsyncDuckDB(logger, worker);
 await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
 ```
-static served (manually download the files from https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm/dist/)
+static served (manually download the files from https://cdn.jsdelivr.net/npm/@run-trace/duckdb-wasm/dist/)
 ```ts
-import * as duckdb from '@duckdb/duckdb-wasm';
+import * as duckdb from '@run-trace/duckdb-wasm';
 
 const MANUAL_BUNDLES: duckdb.DuckDBBundles = {
     mvp: {

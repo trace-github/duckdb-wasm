@@ -12,6 +12,8 @@
 //   --file-stress     Run file stress test
 //   --opfs-persist    Run OPFS persist test
 //   --wasmfs          Run WasmFS test
+//   --bench-threads   Run thread benchmark (bench-threads.html)
+//   --hash-ext        Run hash_ext extension test
 //   --debug-port PORT Chrome remote debugging port (default 9222)
 
 import { spawn } from 'node:child_process';
@@ -44,8 +46,11 @@ for (let i = 0; i < args.length; i++) {
     case '--file-stress': page = '/file-stress-test.html'; break;
     case '--opfs-persist': page = '/opfs-persist-test.html'; break;
     case '--wasmfs':     page = '/wasmfs-test.html'; break;
-    case '--buffer-reg': page = '/buffer-reg-test.html'; break;
-    case '--lua':        page = '/lua-test.html'; break;
+    case '--buffer-reg':    page = '/buffer-reg-test.html'; break;
+    case '--lua':           page = '/lua-test.html'; break;
+    case '--bench-threads': page = '/bench-threads.html'; break;
+    case '--hash-ext':      page = '/hash-ext-test.html'; break;
+    case '--metric-table':  page = '/metric-table-test.html'; break;
     default:
       console.error(`Unknown option: ${args[i]}`);
       process.exit(1);

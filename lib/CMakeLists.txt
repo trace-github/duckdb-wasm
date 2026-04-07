@@ -185,7 +185,9 @@ include("${CMAKE_SOURCE_DIR}/cmake/gflags.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/googletest.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/rapidjson.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/evalexpr_rhai.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/hash_ext.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/lua.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/fts.cmake")
 
 # ---------------------------------------------------------------------------
 # Code coverage
@@ -289,6 +291,10 @@ else()
     ${CMAKE_SOURCE_DIR}/../submodules/evalexpr_rhai/src/include)
 
   add_library(
+    duckdb_web_hash_ext
+    ${CMAKE_SOURCE_DIR}/src/extensions/hash_ext_extension.cc)
+
+  add_library(
     duckdb_web_lua
     ${CMAKE_SOURCE_DIR}/src/extensions/lua_extension.cc
     ${CMAKE_SOURCE_DIR}/../submodules/duckdb_lua/src/lua_extension.cpp)
@@ -297,14 +303,28 @@ else()
     ${CMAKE_SOURCE_DIR}/../submodules/duckdb_lua/src/include
     ${CMAKE_SOURCE_DIR}/../submodules/lua)
 
-  target_link_libraries(duckdb_web duckdb duckdb_web_parquet duckdb_web_json duckdb_web_icu duckdb_web_tpcds duckdb_web_tpch duckdb_web_evalexpr_rhai duckdb_web_lua arrow rapidjson ${THREAD_LIBS})
+  add_library(
+    duckdb_web_fts
+    ${CMAKE_SOURCE_DIR}/src/extensions/fts_extension.cc
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb_fts/extension/fts/fts_extension.cpp
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb_fts/extension/fts/fts_indexing.cpp)
+
+  target_include_directories(duckdb_web_fts PRIVATE
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb_fts/extension/fts/include
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb/third_party/snowball/libstemmer
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb/third_party/snowball/runtime
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb/third_party/snowball/src_c)
+
+  target_link_libraries(duckdb_web duckdb duckdb_web_parquet duckdb_web_json duckdb_web_icu duckdb_web_tpcds duckdb_web_tpch duckdb_web_evalexpr_rhai duckdb_web_hash_ext duckdb_web_lua duckdb_web_fts arrow rapidjson ${THREAD_LIBS})
   target_link_libraries(duckdb_web_parquet duckdb duckdb_parquet)
   target_link_libraries(duckdb_web_json duckdb duckdb_json)
   target_link_libraries(duckdb_web_icu duckdb duckdb_icu)
   target_link_libraries(duckdb_web_tpcds duckdb duckdb_tpcds)
   target_link_libraries(duckdb_web_tpch duckdb duckdb_tpch)
   target_link_libraries(duckdb_web_evalexpr_rhai duckdb evalexpr_rhai_rust)
+  target_link_libraries(duckdb_web_hash_ext duckdb hash_ext_rust)
   target_link_libraries(duckdb_web_lua duckdb lua_c_lib)
+  target_link_libraries(duckdb_web_fts duckdb snowball_stemmer)
 endif()
 
 # ---------------------------------------------------------------------------

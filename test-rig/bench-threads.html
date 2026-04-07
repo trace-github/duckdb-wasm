@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html>
+<head><title>DuckDB-WASM Thread Benchmark</title></head>
+<body>
+<pre id="output">Starting thread benchmark...</pre>
+<script>
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false); // synchronous
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+
+// Safety timeout: 5 minutes (benchmarks are slow)
+setTimeout(function() {
+  addLog('error', 'SAFETY TIMEOUT: no report after 300s');
+  sendReport('FAIL', { error: 'Safety timeout', elapsed: 300000 });
+}, 300000);
+</script>
+<script type="module">
+
+// ---------------------------------------------------------------------------
+// Utility: timeout wrapper
+// ---------------------------------------------------------------------------
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('TIMEOUT after ' + ms + 'ms in: ' + label)), ms)
+    )
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// Utility: extract a BIGINT value from an Arrow IPC buffer
+// Returns the first i64 value found that looks reasonable (non-zero magnitude).
+// Falls back to scanning for a known int32 if the value fits.
+// ---------------------------------------------------------------------------
+function extractInt64FromArrow(buf) {
+  // Arrow IPC: scan for 8-byte little-endian int64 sequences.
+  // We look for the last 8-byte aligned read that produces a plausible positive number.
+  const bytes = new Uint8Array(buf);
+  const abuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const view = new DataView(abuf);
+  // Try reading every 8-byte-aligned position; return the largest plausible value.
+  let best = null;
+  for (let i = 0; i <= bytes.length - 8; i++) {
+    // Read as two int32s (lo, hi) in little-endian
+    const lo = view.getUint32(i, true);
+    const hi = view.getInt32(i + 4, true);
+    if (hi === 0 && lo > 0 && lo < 0x80000000) {
+      // Fits in positive int32 range
+      if (best === null || lo > best) best = lo;
+    } else if (hi > 0 && hi < 100000) {
+      // Large value: reconstruct as number
+      const val = hi * 4294967296 + lo;
+      if (best === null || val > best) best = val;
+    }
+  }
+  return best;
+}
+
+// ---------------------------------------------------------------------------
+// Instantiate a fresh COI DuckDB instance with N threads (in-memory)
+// ---------------------------------------------------------------------------
+async function createDB(mod, threadCount) {
+  const { AsyncDuckDB, ConsoleLogger } = mod;
+  const bundleConfig = {
+    mainModule: '/dist/duckdb-coi.wasm',
+    mainWorker: '/dist/duckdb-browser-coi.worker.js',
+    pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+  };
+
+  const worker = new Worker(bundleConfig.mainWorker);
+  worker.onerror = (e) => addLog('warn', 'Worker error: ' + (e.message || e));
+
+  const logger = new ConsoleLogger();
+  const db = new AsyncDuckDB(logger, worker);
+  await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+
+  await db.open({ maximumThreads: threadCount });
+
+  const conn = await db.connect();
+  // Confirm actual thread count DuckDB is using
+  await conn.query('SET threads = ' + threadCount);
+
+  return { db, conn };
+}
+
+// ---------------------------------------------------------------------------
+// Run a single timed query, return elapsed ms
+// ---------------------------------------------------------------------------
+async function timeQuery(conn, sql, timeoutMs, label) {
+  const t0 = performance.now();
+  await withTimeout(conn.query(sql), timeoutMs, label);
+  return Math.round(performance.now() - t0);
+}
+
+// ---------------------------------------------------------------------------
+// Main benchmark
+// ---------------------------------------------------------------------------
+async function run() {
+  const t0 = Date.now();
+  let db = null;
+
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    addLog('info', 'navigator.hardwareConcurrency: ' + navigator.hardwareConcurrency);
+    _results.push({ label: 'hardwareConcurrency', value: String(navigator.hardwareConcurrency) });
+
+    if (!crossOriginIsolated) {
+      throw new Error('CrossOriginIsolated is false — COI bundle requires COOP/COEP headers');
+    }
+
+    addLog('info', 'Importing module...');
+    const mod = await import('/dist/duckdb-wasm.mjs');
+    addLog('info', 'Module loaded (' + Object.keys(mod).length + ' exports)');
+
+    // -----------------------------------------------------------------------
+    // Benchmark 1: Single-connection, varying thread counts
+    //
+    // Query: large aggregation over 50M random rows — CPU-bound, parallelises well
+    // -----------------------------------------------------------------------
+    const THREAD_COUNTS = [1, 2, 4, 8];
+    // Cap at hardware concurrency so we don't request more threads than available
+    const hw = navigator.hardwareConcurrency || 4;
+    const threadCounts = THREAD_COUNTS.filter(n => n <= Math.max(hw, 1));
+    // Always include 1 thread
+    if (!threadCounts.includes(1)) threadCounts.unshift(1);
+
+    addLog('info', '');
+    addLog('info', '=== Benchmark 1: Aggregation throughput vs. thread count ===');
+    addLog('info', 'Query: SELECT COUNT(*), SUM(a*b) FROM (SELECT random() AS a, random() AS b FROM range(20000000))');
+    addLog('info', 'Thread counts to test: ' + threadCounts.join(', '));
+
+    // Benchmark query — 20M rows of random float multiplication+aggregation
+    const BENCH_SQL = [
+      "SELECT COUNT(*) AS n, SUM(a*b) AS s, AVG(a+b) AS avg_sum",
+      "FROM (SELECT random() AS a, random() AS b FROM range(20000000)) t"
+    ].join(' ');
+
+    const bench1Results = [];
+    let baselineMs = null;
+
+    for (const threads of threadCounts) {
+      addLog('info', '');
+      addLog('info', '--- Thread count: ' + threads + ' ---');
+
+      // Fresh DB instance for each thread count to avoid state bleed
+      const { db: d, conn: c } = await createDB(mod, threads);
+      db = d;
+
+      // Warm-up run (not timed) — let JIT and thread pool settle
+      addLog('info', 'Warm-up run...');
+      await withTimeout(c.query(BENCH_SQL), 120000, 'warmup threads=' + threads);
+
+      // Timed run
+      addLog('info', 'Timed run...');
+      const elapsedMs = await timeQuery(c, BENCH_SQL, 120000, 'bench threads=' + threads);
+
+      if (threads === 1) baselineMs = elapsedMs;
+      const speedup = baselineMs ? (baselineMs / elapsedMs).toFixed(2) : '—';
+
+      addLog('info', 'threads=' + threads + '  time=' + elapsedMs + 'ms  speedup=' + speedup + 'x');
+      bench1Results.push({ threads, elapsedMs, speedup });
+      _results.push({
+        label: 'bench1_threads_' + threads,
+        value: elapsedMs + 'ms (speedup ' + speedup + 'x)'
+      });
+
+      await c.close();
+      await d.terminate();
+      db = null;
+    }
+
+    // Print summary table
+    addLog('info', '');
+    addLog('info', 'Benchmark 1 Summary:');
+    addLog('info', 'threads | time_ms | speedup_vs_1_thread');
+    addLog('info', '--------|---------|--------------------');
+    for (const r of bench1Results) {
+      const t = String(r.threads).padEnd(7);
+      const m = String(r.elapsedMs).padEnd(8);
+      addLog('info', t + ' | ' + m + ' | ' + r.speedup + 'x');
+    }
+
+    // -----------------------------------------------------------------------
+    // Benchmark 2: Hash aggregation (GROUP BY) — tests parallel hash tables
+    // -----------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '=== Benchmark 2: GROUP BY aggregation vs. thread count ===');
+    addLog('info', 'Query: SELECT (v % 1000) AS bucket, COUNT(*), SUM(v) FROM range(30000000) GROUP BY bucket');
+
+    const BENCH2_SQL = [
+      "SELECT (v % 1000) AS bucket, COUNT(*) AS n, SUM(v) AS s",
+      "FROM (SELECT range AS v FROM range(30000000)) t",
+      "GROUP BY bucket",
+      "ORDER BY bucket"
+    ].join(' ');
+
+    const bench2Results = [];
+    let baseline2Ms = null;
+
+    for (const threads of threadCounts) {
+      addLog('info', '');
+      addLog('info', '--- Thread count: ' + threads + ' ---');
+
+      const { db: d, conn: c } = await createDB(mod, threads);
+      db = d;
+
+      // Warm-up
+      addLog('info', 'Warm-up run...');
+      await withTimeout(c.query(BENCH2_SQL), 120000, 'bench2 warmup threads=' + threads);
+
+      // Timed run
+      addLog('info', 'Timed run...');
+      const elapsedMs = await timeQuery(c, BENCH2_SQL, 120000, 'bench2 threads=' + threads);
+
+      if (threads === 1) baseline2Ms = elapsedMs;
+      const speedup = baseline2Ms ? (baseline2Ms / elapsedMs).toFixed(2) : '—';
+
+      addLog('info', 'threads=' + threads + '  time=' + elapsedMs + 'ms  speedup=' + speedup + 'x');
+      bench2Results.push({ threads, elapsedMs, speedup });
+      _results.push({
+        label: 'bench2_threads_' + threads,
+        value: elapsedMs + 'ms (speedup ' + speedup + 'x)'
+      });
+
+      await c.close();
+      await d.terminate();
+      db = null;
+    }
+
+    addLog('info', '');
+    addLog('info', 'Benchmark 2 Summary (GROUP BY):');
+    addLog('info', 'threads | time_ms | speedup_vs_1_thread');
+    addLog('info', '--------|---------|--------------------');
+    for (const r of bench2Results) {
+      const t = String(r.threads).padEnd(7);
+      const m = String(r.elapsedMs).padEnd(8);
+      addLog('info', t + ' | ' + m + ' | ' + r.speedup + 'x');
+    }
+
+    // -----------------------------------------------------------------------
+    // Benchmark 3: Concurrent connections (parallel query execution)
+    //   Open a single DB with max threads. Run N queries concurrently
+    //   via N separate connections, vs. the same queries sequentially.
+    //
+    //   Each query is a moderate aggregation so individual runtime is
+    //   measurable but not so long that total sequential time is huge.
+    // -----------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '=== Benchmark 3: Concurrent connections vs. sequential ===');
+
+    const CONCURRENCY_THREADS = Math.min(hw, 8);
+    const NUM_CONNS = 4; // number of concurrent connections
+    addLog('info', 'DB thread count: ' + CONCURRENCY_THREADS + ', connections: ' + NUM_CONNS);
+
+    const CONCURRENT_SQL = [
+      "SELECT SUM(v) AS s, AVG(v) AS a, COUNT(*) AS n",
+      "FROM (SELECT range AS v FROM range(10000000)) t"
+    ].join(' ');
+
+    const { db: dbC, conn: connC0 } = await createDB(mod, CONCURRENCY_THREADS);
+    db = dbC;
+
+    // --- Sequential: run NUM_CONNS queries one after another on a single connection ---
+    addLog('info', 'Sequential: ' + NUM_CONNS + ' queries on 1 connection...');
+    const tSeqStart = performance.now();
+    for (let i = 0; i < NUM_CONNS; i++) {
+      await withTimeout(connC0.query(CONCURRENT_SQL), 120000, 'seq query ' + i);
+    }
+    const seqMs = Math.round(performance.now() - tSeqStart);
+    addLog('info', 'Sequential total: ' + seqMs + 'ms  (avg per query: ' + Math.round(seqMs / NUM_CONNS) + 'ms)');
+    _results.push({ label: 'concurrent_sequential_ms', value: String(seqMs) });
+
+    // --- Concurrent: open NUM_CONNS connections, fire queries simultaneously ---
+    addLog('info', 'Concurrent: ' + NUM_CONNS + ' connections, queries fired in parallel...');
+    const extraConns = [];
+    for (let i = 0; i < NUM_CONNS; i++) {
+      extraConns.push(await dbC.connect());
+    }
+
+    const tConStart = performance.now();
+    await Promise.all(extraConns.map((c, i) =>
+      withTimeout(c.query(CONCURRENT_SQL), 120000, 'concurrent query ' + i)
+    ));
+    const conMs = Math.round(performance.now() - tConStart);
+    addLog('info', 'Concurrent total: ' + conMs + 'ms  (avg per query: ' + Math.round(conMs / NUM_CONNS) + 'ms)');
+    _results.push({ label: 'concurrent_parallel_ms', value: String(conMs) });
+
+    const concurrentSpeedup = (seqMs / conMs).toFixed(2);
+    addLog('info', 'Concurrent speedup vs sequential: ' + concurrentSpeedup + 'x');
+    _results.push({ label: 'concurrent_speedup', value: concurrentSpeedup + 'x' });
+
+    addLog('info', '');
+    addLog('info', 'Benchmark 3 Summary (concurrent connections):');
+    addLog('info', 'mode        | total_ms | speedup');
+    addLog('info', '------------|----------|--------');
+    addLog('info', 'sequential  | ' + String(seqMs).padEnd(9) + '| 1.00x');
+    addLog('info', 'concurrent  | ' + String(conMs).padEnd(9) + '| ' + concurrentSpeedup + 'x');
+
+    for (const c of extraConns) await c.close();
+    await connC0.close();
+    await dbC.terminate();
+    db = null;
+
+    // -----------------------------------------------------------------------
+    // Final summary
+    // -----------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '=== All benchmarks complete ===');
+    addLog('info', 'hardwareConcurrency: ' + hw);
+    addLog('info', '');
+    addLog('info', 'Benchmark 1 (random float aggregation):');
+    for (const r of bench1Results) {
+      addLog('info', '  ' + r.threads + ' thread(s): ' + r.elapsedMs + 'ms  speedup=' + r.speedup + 'x');
+    }
+    addLog('info', '');
+    addLog('info', 'Benchmark 2 (GROUP BY aggregation):');
+    for (const r of bench2Results) {
+      addLog('info', '  ' + r.threads + ' thread(s): ' + r.elapsedMs + 'ms  speedup=' + r.speedup + 'x');
+    }
+    addLog('info', '');
+    addLog('info', 'Benchmark 3 (concurrent connections, ' + CONCURRENCY_THREADS + ' DB threads):');
+    addLog('info', '  sequential:  ' + seqMs + 'ms');
+    addLog('info', '  concurrent:  ' + conMs + 'ms  speedup=' + concurrentSpeedup + 'x');
+
+    const elapsed = Date.now() - t0;
+    addLog('info', '');
+    addLog('info', 'Total benchmark time: ' + elapsed + 'ms');
+
+    sendReport('PASS', { elapsed: elapsed, bundle: 'coi' });
+
+  } catch (e) {
+    addLog('error', 'FAILED: ' + e.message);
+    addLog('error', e.stack || '(no stack)');
+    if (db) {
+      try { await db.terminate(); } catch (x) { /* ignore */ }
+      db = null;
+    }
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message, stack: e.stack || '' });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html>
+<head><title>DuckDB-WASM metric_table Test</title></head>
+<body>
+<pre id="output">Starting metric_table test...</pre>
+<script>
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+</script>
+<script type="module">
+
+function bufText(buf) {
+  return new TextDecoder().decode(new Uint8Array(buf));
+}
+function extractStr(buf) {
+  const text = bufText(buf);
+  if (text.includes('true'))  return 'true';
+  if (text.includes('false')) return 'false';
+  const m = text.match(/(\d+)/g);
+  return m ? m[m.length - 1] : null;
+}
+
+async function run() {
+  const t0 = Date.now();
+  let db = null;
+
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    if (!crossOriginIsolated) throw new Error('CrossOriginIsolated is false');
+
+    const mod = await import('/dist/duckdb-wasm.mjs');
+    const bundleConfig = {
+      mainModule:    '/dist/duckdb-coi.wasm',
+      mainWorker:    '/dist/duckdb-browser-coi.worker.js',
+      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    };
+    const { AsyncDuckDB, ConsoleLogger } = mod;
+    const worker = new Worker(bundleConfig.mainWorker);
+    worker.onerror = (e) => addLog('error', 'Worker error: ' + (e.message || e));
+    db = new AsyncDuckDB(new ConsoleLogger(), worker);
+    await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+    await db.open({ maximumThreads: 4 });
+    const conn = await db.connect();
+
+    let pass = 0, fail = 0, r;
+
+    function check(label, actual, expected) {
+      if (String(actual) === String(expected)) {
+        addLog('info', '  PASS: ' + label);
+        _results.push({ label, value: 'PASS' });
+        pass++;
+      } else {
+        addLog('error', '  FAIL: ' + label + ' — expected [' + expected + '], got [' + actual + ']');
+        _results.push({ label, value: 'FAIL: expected ' + expected + ', got ' + actual });
+        fail++;
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Setup: create source table matching the user's example JSON structure
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- Setup ---');
+
+    await conn.query(`
+      CREATE TABLE src AS
+      SELECT
+        to_json({
+          series_id: 'sensor_A',
+          bint_val: 12345678901234567890::ubigint,
+          ts_val:   now()::VARCHAR,
+          date_val: '2026-01-01'::date,
+          bool_val: false::bool,
+          null_val: null,
+          int_val:  123456,
+          dbl_val:  3.14159::double,
+          str_val:  'hello'
+        })::JSON AS vals,
+        0.95::FLOAT AS value,
+        100::INTEGER AS count,
+        'sensor_A' AS series
+      UNION ALL
+      SELECT
+        to_json({
+          series_id: 'sensor_B',
+          bint_val: 9999::ubigint,
+          ts_val:   '2026-03-01T00:00:00'::VARCHAR,
+          date_val: '2026-03-01'::date,
+          bool_val: true::bool,
+          null_val: null,
+          int_val:  -7,
+          dbl_val:  2.71828::double,
+          str_val:  'world'
+        })::JSON AS vals,
+        0.85::FLOAT AS value,
+        50::INTEGER AS count,
+        'sensor_B' AS series
+      UNION ALL
+      SELECT
+        -- missing int_val / dbl_val / bool_val / str_val intentionally
+        to_json({ series_id: 'sensor_C', only_key: 'present' })::JSON AS vals,
+        0.5::FLOAT  AS value,
+        25::INTEGER AS count,
+        'sensor_C' AS series
+    `);
+
+    // -------------------------------------------------------------------------
+    // Section 1: series_id extraction
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- series_id extraction ---');
+
+    r = await conn.query(`
+      SELECT (series_id = 'sensor_A')::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src LIMIT 1),
+        'series_id', ['x'], 'y'
+      )
+    `);
+    check('series_id_extracted', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 2: parent_match_hash / target_match_hash
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- hashes ---');
+
+    r = await conn.query(`
+      SELECT (parent_match_hash IS NOT NULL AND target_match_hash IS NOT NULL)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src LIMIT 1),
+        'series_id', ['bool_val', 'int_val'], 'str_val'
+      )
+    `);
+    check('hashes_not_null', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT (parent_match_hash <> target_match_hash)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src LIMIT 1),
+        'series_id', ['bool_val', 'int_val'], 'str_val'
+      )
+    `);
+    check('parent_ne_target_hash', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT (count(DISTINCT parent_match_hash) = 1)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src WHERE series = 'sensor_A'),
+        'series_id', ['bool_val', 'int_val'], 'str_val'
+      )
+    `);
+    check('hash_deterministic', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT (count(DISTINCT parent_match_hash) = 2)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src WHERE series IN ('sensor_A','sensor_B')),
+        'series_id', ['bool_val', 'int_val'], 'str_val'
+      )
+    `);
+    check('different_json_different_hash', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT (parent_match_hash IS NULL AND target_match_hash IS NULL)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src WHERE series = 'sensor_C'),
+        'series_id', ['bool_val', 'int_val'], 'str_val'
+      )
+    `);
+    check('missing_key_null_hash', extractStr(r), 'true');
+
+    r = await conn.query(`
+      WITH t AS (
+        SELECT target_match_hash
+        FROM metric_table(
+          (SELECT vals, value, count FROM src LIMIT 1),
+          'series_id', ['bool_val', 'int_val'], 'str_val'
+        )
+      ),
+      s AS (
+        SELECT hash_json_keys(['bool_val','int_val','str_val'], vals) AS h
+        FROM src LIMIT 1
+      )
+      SELECT (t.target_match_hash = s.h)::VARCHAR AS ok FROM t, s
+    `);
+    check('target_hash_matches_hash_json_keys', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 3: json_typed_extract — varchar
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', "--- json_typed_extract 'varchar' ---");
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'str_val', 'varchar')).value_varchar = 'hello')::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_A'
+    `);
+    check('varchar_extracted', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'str_val', 'varchar')).value_bigint IS NULL
+           AND (json_typed_extract(vals, 'str_val', 'varchar')).value_double IS NULL
+           AND (json_typed_extract(vals, 'str_val', 'varchar')).value_boolean IS NULL)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_A'
+    `);
+    check('varchar_others_null', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'str_val', 'varchar')).value_varchar = 'world')::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_B'
+    `);
+    check('varchar_second_row', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'str_val', 'varchar')).value_varchar IS NULL)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_C'
+    `);
+    check('varchar_missing_null', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 4: json_typed_extract — bigint
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', "--- json_typed_extract 'bigint' ---");
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'int_val', 'bigint')).value_bigint = 123456)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_A'
+    `);
+    check('bigint_extracted', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'int_val', 'bigint')).value_bigint = -7)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_B'
+    `);
+    check('bigint_negative', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'int_val', 'bigint')).value_varchar IS NULL
+           AND (json_typed_extract(vals, 'int_val', 'bigint')).value_double IS NULL
+           AND (json_typed_extract(vals, 'int_val', 'bigint')).value_boolean IS NULL)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_A'
+    `);
+    check('bigint_others_null', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'int_val', 'bigint')).value_bigint IS NULL)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_C'
+    `);
+    check('bigint_missing_null', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 5: json_typed_extract — double
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', "--- json_typed_extract 'double' ---");
+
+    r = await conn.query(`
+      SELECT (abs((json_typed_extract(vals, 'dbl_val', 'double')).value_double - 3.14159) < 0.00001)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_A'
+    `);
+    check('double_extracted', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT (abs((json_typed_extract(vals, 'dbl_val', 'double')).value_double - 2.71828) < 0.00001)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_B'
+    `);
+    check('double_second_row', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'dbl_val', 'double')).value_double IS NULL)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_C'
+    `);
+    check('double_missing_null', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 6: json_typed_extract — boolean
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', "--- json_typed_extract 'boolean' ---");
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'bool_val', 'boolean')).value_boolean = false)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_A'
+    `);
+    check('boolean_false_extracted', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'bool_val', 'boolean')).value_boolean = true)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_B'
+    `);
+    check('boolean_true_extracted', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'bool_val', 'boolean')).value_boolean IS NULL)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_C'
+    `);
+    check('boolean_missing_null', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 7: json_typed_extract — JSON null value → SQL NULL
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- JSON null value ---');
+
+    r = await conn.query(`
+      SELECT ((json_typed_extract(vals, 'null_val', 'varchar')).value_varchar IS NULL)::VARCHAR AS ok
+      FROM src WHERE series = 'sensor_A'
+    `);
+    check('json_null_gives_sql_null', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 8: pass-through value + count
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- pass-through value / count ---');
+
+    r = await conn.query(`
+      SELECT (abs(value::DOUBLE - 0.95) < 0.001 AND count = 100)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src WHERE series = 'sensor_A'),
+        'series_id', ['int_val'], 'str_val'
+      )
+    `);
+    check('passthrough_value_count', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 9: pass-through vals column
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- pass-through vals ---');
+
+    r = await conn.query(`
+      SELECT (vals IS NOT NULL AND json_extract_string(vals, 'str_val') = 'hello')::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src WHERE series = 'sensor_A'),
+        'series_id', ['int_val'], 'str_val'
+      )
+    `);
+    check('passthrough_vals', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 10: multi-row batch — all three source rows at once
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- multi-row batch ---');
+
+    r = await conn.query(`
+      SELECT (count(*) = 3)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src),
+        'series_id', ['bool_val', 'int_val'], 'str_val'
+      )
+    `);
+    check('batch_row_count', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT (count(series_id) = 3)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src),
+        'series_id', ['bool_val', 'int_val'], 'str_val'
+      )
+    `);
+    check('batch_series_id_non_null', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT (count(DISTINCT series_id) = 3)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src),
+        'series_id', ['bool_val', 'int_val'], 'str_val'
+      )
+    `);
+    check('batch_distinct_series', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 11: output schema
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- output schema ---');
+
+    r = await conn.query(`
+      SELECT (typeof(vals) = 'JSON' OR typeof(vals) = 'VARCHAR')::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src LIMIT 1),
+        'series_id', ['int_val'], 'str_val'
+      )
+    `);
+    check('vals_is_varchar_or_json', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT (typeof(parent_match_hash) = 'UINTEGER'
+           AND typeof(target_match_hash) = 'UINTEGER'
+           AND typeof(target_value_hash) = 'UINTEGER')::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src LIMIT 1),
+        'series_id', ['int_val'], 'str_val'
+      )
+    `);
+    check('hash_cols_are_uinteger', extractStr(r), 'true');
+
+    // json_typed_extract return type
+    r = await conn.query(`
+      SELECT (typeof((json_typed_extract(vals, 'int_val', 'bigint')).value_bigint) = 'BIGINT'
+           AND typeof((json_typed_extract(vals, 'dbl_val', 'double')).value_double) = 'DOUBLE'
+           AND typeof((json_typed_extract(vals, 'bool_val', 'boolean')).value_boolean) = 'BOOLEAN')::VARCHAR AS ok
+      FROM src LIMIT 1
+    `);
+    check('typed_extract_col_types', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 12: target_value_hash
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- target_value_hash ---');
+
+    r = await conn.query(`
+      WITH t AS (
+        SELECT target_value_hash
+        FROM metric_table(
+          (SELECT vals, value, count FROM src WHERE series = 'sensor_A'),
+          'series_id', ['bool_val'], 'str_val'
+        )
+      ),
+      s AS (SELECT hash_json(vals, 'str_val') AS h FROM src WHERE series = 'sensor_A')
+      SELECT (t.target_value_hash = s.h)::VARCHAR AS ok FROM t, s
+    `);
+    check('target_value_hash_matches_hash_json', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT (target_value_hash IS NULL)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src WHERE series = 'sensor_C'),
+        'series_id', ['only_key'], 'str_val'
+      )
+    `);
+    check('target_value_hash_missing_null', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT (count(DISTINCT target_value_hash) = 2)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src WHERE series IN ('sensor_A','sensor_B')),
+        'series_id', ['bool_val'], 'str_val'
+      )
+    `);
+    check('target_value_hash_distinct', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 13: null target_key → all target columns NULL
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- null target_key ---');
+
+    r = await conn.query(`
+      SELECT (target_match_hash IS NULL AND target_value_hash IS NULL)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src WHERE series = 'sensor_A'),
+        'series_id', ['bool_val'], NULL
+      )
+    `);
+    check('null_target_key_nulls_target_cols', extractStr(r), 'true');
+
+    r = await conn.query(`
+      SELECT (parent_match_hash IS NOT NULL)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src WHERE series = 'sensor_A'),
+        'series_id', ['bool_val', 'int_val'], NULL
+      )
+    `);
+    check('null_target_key_parent_hash_ok', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 14: empty parent_keys → parent_match_hash NULL, target still works
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- empty parent_keys ---');
+
+    r = await conn.query(`
+      SELECT (parent_match_hash IS NULL AND target_match_hash IS NOT NULL)::VARCHAR AS ok
+      FROM metric_table(
+        (SELECT vals, value, count FROM src WHERE series = 'sensor_A'),
+        'series_id', []::VARCHAR[], 'str_val'
+      )
+    `);
+    check('empty_parent_keys_pmh_null_tmh_ok', extractStr(r), 'true');
+
+    r = await conn.query(`
+      WITH t AS (
+        SELECT target_match_hash
+        FROM metric_table(
+          (SELECT vals, value, count FROM src WHERE series = 'sensor_A'),
+          'series_id', []::VARCHAR[], 'str_val'
+        )
+      ),
+      s AS (SELECT hash_json_keys(['str_val'], vals) AS h FROM src WHERE series = 'sensor_A')
+      SELECT (t.target_match_hash = s.h)::VARCHAR AS ok FROM t, s
+    `);
+    check('empty_parent_keys_tmh_equals_hash_json_keys', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Summary
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    if (fail === 0) {
+      addLog('info', '=== ALL TESTS PASSED (' + pass + '/' + (pass + fail) + ') ===');
+    } else {
+      addLog('error', '=== FAILED: ' + fail + '/' + (pass + fail) + ' tests failed ===');
+    }
+
+    await conn.close();
+    await db.terminate();
+    db = null;
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'Total time: ' + elapsed + 'ms');
+
+    if (fail > 0) sendReport('FAIL', { elapsed, pass, fail });
+    else sendReport('PASS', { elapsed, bundle: 'coi', pass, fail });
+
+  } catch (e) {
+    addLog('error', 'FAILED: ' + e.message);
+    addLog('error', e.stack || '(no stack)');
+    if (db) { try { await db.terminate(); } catch (x) {} }
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message, stack: e.stack || '' });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

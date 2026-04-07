@@ -1,31 +1,32 @@
-# DuckDB-WASM, Customized
+# @run-trace/duckdb-wasm
 
-[DuckDB](https://duckdb.org) is an in-process SQL OLAP Database Management System.
-DuckDB-WASM brings DuckDB to every browser thanks to WebAssembly.
+A custom build of [DuckDB-WASM](https://github.com/duckdb/duckdb-wasm), forked from [ridge-ai/duckdb-wasm](https://github.com/ridge-ai/duckdb-wasm), with modifications for multi-threaded browser use.
 
-This project is a fork of the official DuckDB-WASM repository, with some modifications:
+**What's different from the standard DuckDB-WASM package:**
 
-- *WASM build*: Core extensions (`parquet`, `json`) are pre-bundled for faster loading. Additional runtime extensions are not supported. The resulting WASM bundles are about 2/3 the size of the official version. Multi-threaded execution is supported when `crossOriginIsolation` is enabled.
-- *JS client*: The browser client has no `apache-arrow` JS lib dependency. Instead raw IPC buffers (`Uint8Array`) are returned as query results. This reduces the bundle size by ~10x and allows clients to "bring their own" Arrow library (such as [flechette](https://github.com/uwdata/flechette)). In addition, UDFs are not (currently) supported.
+- **WasmFS** — supports multiple threads reading files concurrently. Due to base package design around connections, we are still limited to one query at a time. I only see 20-30% improvement on large queries from parquet.
+- **Statically linked extensions** — JSON, parquet, and other extensions are linked directly into the WASM binary, fixing load failures when running with multiple threads
+- **Custom Rust extension** — a hashing extension for JSON values (example of how to write one).
+- **No apache-arrow dependency** — raw IPC buffers (`Uint8Array`) are returned as query results; bring your own Arrow library (e.g. [flechette](https://github.com/uwdata/flechette))
+- **Dockerfile to support building**
+
+Published as [`@run-trace/duckdb-wasm`](https://www.npmjs.com/package/@run-trace/duckdb-wasm).
 
 ## Build From Source
 
 ```shell
-git clone https://github.com/ridge-ai/duckdb-wasm.git
+git clone https://github.com/trace-github/duckdb-wasm.git
 cd duckdb-wasm
 git submodule init
 git submodule update
-make apply_patches
-make build_wasm_all
-cd packages/duckdb-wasm
-npm run build
+./build-wasm.sh
 ```
 
-After building, use `npm run dev` in `packages/duckdb-wasm` to run basic dev tests (see browser console).
+Requires Docker Desktop (16 GiB memory recommended). See [CLAUDE.md](CLAUDE.md) for full build details.
 
 ## Repository Structure
 
-| Subproject                                               | Description    | Language   |
-| -------------------------------------------------------- | :------------- | :--------- |
-| [duckdb_wasm](/lib)                                      | Wasm Library   | C++        |
-| [@duckdb/duckdb-wasm](/packages/duckdb-wasm)             | Typescript API | Typescript |
+| Subproject | Description | Language |
+| --- | :--- | :--- |
+| [duckdb_wasm](/lib) | Wasm Library | C++ |
+| [@run-trace/duckdb-wasm](/packages/duckdb-wasm) | TypeScript API | TypeScript |

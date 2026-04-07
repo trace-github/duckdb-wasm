@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html>
+<head><title>DuckDB-WASM hash_ext Test</title></head>
+<body>
+<pre id="output">Starting hash_ext test...</pre>
+<script>
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+</script>
+<script type="module">
+
+// conn.query() returns raw Arrow IPC bytes.
+// Arrow stores VARCHAR columns as raw UTF-8 in a contiguous buffer,
+// so TextDecoder finds the value. BOOLEAN/INTEGER are binary — cast to VARCHAR in SQL.
+function bufText(buf) {
+  return new TextDecoder().decode(new Uint8Array(buf));
+}
+
+// Extract the first 16-char lowercase hex string (our hash output).
+function extractHash(buf) {
+  const m = bufText(buf).match(/[0-9a-f]{16}/);
+  return m ? m[0] : null;
+}
+
+// Extract a VARCHAR value that should be "true" or "false" (cast in SQL).
+function extractStr(buf) {
+  const text = bufText(buf);
+  // Arrow packs strings with a length prefix; scan for recognisable values
+  if (text.includes('true'))  return 'true';
+  if (text.includes('false')) return 'false';
+  // For numeric strings like "5000" — return the last run of digits
+  const m = text.match(/(\d+)/g);
+  return m ? m[m.length - 1] : null;
+}
+
+async function run() {
+  const t0 = Date.now();
+  let db = null;
+
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    addLog('info', 'SharedArrayBuffer available: ' + (typeof SharedArrayBuffer !== 'undefined'));
+
+    if (!crossOriginIsolated) {
+      throw new Error('CrossOriginIsolated is false - COI bundle requires COOP/COEP headers');
+    }
+
+    addLog('info', 'Importing module...');
+    const mod = await import('/dist/duckdb-wasm.mjs');
+    addLog('info', 'Module loaded (' + Object.keys(mod).length + ' exports)');
+
+    const bundleConfig = {
+      mainModule: '/dist/duckdb-coi.wasm',
+      mainWorker: '/dist/duckdb-browser-coi.worker.js',
+      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    };
+
+    const { AsyncDuckDB, ConsoleLogger } = mod;
+    const worker = new Worker(bundleConfig.mainWorker);
+    worker.onerror = (e) => {
+      addLog('error', 'Worker error: ' + (e.message || e) + ' at ' + (e.filename || '?') + ':' + (e.lineno || '?'));
+    };
+
+    const logger = new ConsoleLogger();
+    db = new AsyncDuckDB(logger, worker);
+
+    addLog('info', 'Instantiating COI bundle...');
+    await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+    addLog('info', 'COI bundle instantiated');
+
+    await db.open({ maximumThreads: 4 });
+    addLog('info', 'Database opened (in-memory, 4 threads)');
+
+    const conn = await db.connect();
+    addLog('info', 'Connected');
+
+    const vbuf = await conn.query("SELECT version() AS v");
+    const vm = bufText(vbuf).match(/v[\d.]+(-dev\d+)?/);
+    addLog('info', 'DuckDB version: ' + (vm ? vm[0] : 'unknown'));
+    _results.push({ label: 'version', value: vm ? vm[0] : 'unknown' });
+
+    let pass = 0;
+    let fail = 0;
+
+    function check(label, actual, expected) {
+      if (String(actual) === String(expected)) {
+        addLog('info', '  PASS: ' + label);
+        _results.push({ label: label, value: 'PASS' });
+        pass++;
+      } else {
+        addLog('error', '  FAIL: ' + label + ' — expected [' + expected + '], got [' + actual + ']');
+        _results.push({ label: label, value: 'FAIL: expected ' + expected + ', got ' + actual });
+        fail++;
+      }
+    }
+
+    // Cast results to VARCHAR so bufText can find them — Arrow stores BOOLEAN/INTEGER as binary.
+    // We use ::VARCHAR on all non-string results.
+
+    // -------------------------------------------------------------------------
+    // Section 1: Known hash values (pre-computed FNV-1a)
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- Known hash values ---');
+    let r;
+
+    r = await conn.query("SELECT row_hash('user1', 'hello') AS h");
+    check('known_hash_user1_hello', extractHash(r), 'b640d6eba4e95e3a');
+
+    r = await conn.query("SELECT row_hash('ab', 'c') AS h");
+    check('known_hash_ab_c', extractHash(r), 'fdf3a083ef9bc024');
+
+    r = await conn.query("SELECT row_hash('a', 'bc') AS h");
+    check('known_hash_a_bc', extractHash(r), 'd2b3f5819298d9d6');
+
+    // -------------------------------------------------------------------------
+    // Section 2: Correctness properties — cast booleans to VARCHAR
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- Correctness ---');
+
+    r = await conn.query("SELECT (row_hash('abc', 'xyz') = row_hash('abc', 'xyz'))::VARCHAR AS ok");
+    check('same_inputs_same_hash', extractStr(r), 'true');
+
+    r = await conn.query("SELECT (row_hash('a', 'b') <> row_hash('b', 'a'))::VARCHAR AS ok");
+    check('different_order_diff_hash', extractStr(r), 'true');
+
+    r = await conn.query("SELECT (row_hash('ab', 'c') <> row_hash('a', 'bc'))::VARCHAR AS ok");
+    check('separator_prevents_collision', extractStr(r), 'true');
+
+    r = await conn.query("SELECT (length(row_hash('hello', 'world')) = 16)::VARCHAR AS ok");
+    check('hash_is_16_chars', extractStr(r), 'true');
+
+    r = await conn.query("SELECT (row_hash('x', 'y') ~ '^[0-9a-f]{16}$')::VARCHAR AS ok");
+    check('hash_is_lowercase_hex', extractStr(r), 'true');
+
+    r = await conn.query("SELECT (length(row_hash('', '')) = 16)::VARCHAR AS ok");
+    check('empty_strings_ok', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 3: Multi-row batch execution — cast counts to VARCHAR
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- Multi-row batch execution ---');
+
+    r = await conn.query(
+      "SELECT count(DISTINCT row_hash(id, value))::VARCHAR AS n " +
+      "FROM (SELECT 'x' AS id, 'y' AS value FROM range(5)) t"
+    );
+    check('identical_rows_one_hash', extractStr(r), '1');
+
+    r = await conn.query(
+      "SELECT (count(DISTINCT row_hash(id, value)) = 10)::VARCHAR AS ok " +
+      "FROM (SELECT 'id'||i::VARCHAR AS id, 'val'||i::VARCHAR AS value FROM range(10) t(i)) t"
+    );
+    check('unique_rows_unique_hashes', extractStr(r), 'true');
+
+    r = await conn.query(
+      "SELECT (count(DISTINCT row_hash(id, value)) = 10000)::VARCHAR AS ok " +
+      "FROM (SELECT 'id'||i::VARCHAR AS id, 'val'||i::VARCHAR AS value FROM range(10000) t(i)) t"
+    );
+    check('no_collisions_10k', extractStr(r), 'true');
+
+    await conn.query(
+      "SELECT count(row_hash(id, value)) AS n " +
+      "FROM (SELECT 'id'||i::VARCHAR AS id, 'val'||i::VARCHAR AS value FROM range(5000) t(i)) t"
+    );
+    addLog('info', '  PASS: count_5k_rows (query completed)');
+    _results.push({ label: 'count_5k_rows', value: 'PASS' });
+    pass++;
+
+    // -------------------------------------------------------------------------
+    // Section 4: Performance comparison — cast counts to VARCHAR
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- Performance: row_hash() vs DuckDB built-in hash() (10M rows) ---');
+
+    // Warm up
+    await conn.query(
+      "SELECT count(row_hash(id, value)) FROM " +
+      "(SELECT 'id'||i::VARCHAR AS id, 'val'||i::VARCHAR AS value FROM range(100000) t(i)) t"
+    );
+
+    const BASE = "SELECT 'id'||i::VARCHAR AS id, 'val'||i::VARCHAR AS value FROM range(10000000) t(i)";
+
+    const t1 = performance.now();
+    await conn.query("SELECT count(row_hash(id, value)) AS n FROM (" + BASE + ") t");
+    const rowHashMs = Math.round(performance.now() - t1);
+    addLog('info', '  row_hash() 10M rows: ' + rowHashMs + 'ms');
+    _results.push({ label: 'perf_row_hash_10m_ms', value: String(rowHashMs) });
+
+    const t2 = performance.now();
+    await conn.query("SELECT count(hash(id, value)) AS n FROM (" + BASE + ") t");
+    const builtinMs = Math.round(performance.now() - t2);
+    addLog('info', '  builtin hash() 10M rows: ' + builtinMs + 'ms');
+    _results.push({ label: 'perf_builtin_hash_10m_ms', value: String(builtinMs) });
+
+    const ratio = (rowHashMs / Math.max(builtinMs, 1)).toFixed(2);
+    addLog('info', '  row_hash/builtin ratio: ' + ratio + 'x');
+    _results.push({ label: 'perf_row_hash_vs_builtin_ratio', value: ratio + 'x' });
+
+    // -------------------------------------------------------------------------
+    // Section 5: Table function hash_table((SELECT ...))
+    // DuckDB TABLE-parameter functions use double-paren subquery syntax:
+    //   hash_table((SELECT id, value FROM src))
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- Table function: hash_table((SELECT ...)) ---');
+
+    // Create a small source table
+    await conn.query("CREATE TABLE _ht_src AS SELECT 'id'||i::VARCHAR AS id, 'val'||i::VARCHAR AS value FROM range(20) t(i)");
+
+    // Basic: returns same number of rows as source
+    r = await conn.query("SELECT (count(*) = 20)::VARCHAR AS ok FROM hash_table((SELECT * FROM _ht_src))");
+    check('hash_table_row_count', extractStr(r), 'true');
+
+    // Hash values match scalar row_hash()
+    r = await conn.query(
+      "SELECT bool_and(row_hash(id,value) = h)::VARCHAR AS ok " +
+      "FROM (SELECT id, value, hash AS h FROM hash_table((SELECT * FROM _ht_src))) sub " +
+      "JOIN _ht_src USING (id, value)"
+    );
+    check('hash_table_matches_scalar', extractStr(r), 'true');
+
+    // Known value — inline subquery
+    r = await conn.query("SELECT hash FROM hash_table((SELECT 'user1'::VARCHAR AS id, 'hello'::VARCHAR AS value))");
+    check('hash_table_known_value', extractHash(r), 'b640d6eba4e95e3a');
+
+    // Filtered subquery
+    await conn.query("CREATE TABLE _ht_src2 AS SELECT 'id'||i::VARCHAR AS id, 'val'||i::VARCHAR AS value FROM range(100) t(i)");
+    r = await conn.query("SELECT (count(*) = 10)::VARCHAR AS ok FROM hash_table((SELECT id, value FROM _ht_src2 LIMIT 10))");
+    check('hash_table_filtered_subquery', extractStr(r), 'true');
+
+    // types column: VARCHAR[] listing input column types
+    r = await conn.query(
+      "SELECT (types[1] = 'VARCHAR' AND types[2] = 'VARCHAR' AND len(types) = 2)::VARCHAR AS ok " +
+      "FROM hash_table((SELECT * FROM _ht_src)) LIMIT 1"
+    );
+    check('hash_table_types_column', extractStr(r), 'true');
+
+    // types column reflects all input columns including extras beyond id/value
+    r = await conn.query(
+      "SELECT (types[1] = 'VARCHAR' AND types[2] = 'VARCHAR' AND types[3] = 'BIGINT' AND len(types) = 3)::VARCHAR AS ok " +
+      "FROM hash_table((SELECT i::VARCHAR AS id, 'v'::VARCHAR AS value, i AS num FROM range(1) t(i))) LIMIT 1"
+    );
+    check('hash_table_types_extra_col', extractStr(r), 'true'); // range() produces BIGINT
+
+    // -------------------------------------------------------------------------
+    // Section 5b: hash_json(json_col, key) — zero-copy JSON property hashing
+    //
+    // DuckDB's JSON type is stored as raw UTF-8 bytes (a VARCHAR internally).
+    // Rust reads the same memory directly via from_raw_parts — no parse, no
+    // alloc, no serialization. The Rust code walks the raw bytes to extract
+    // the named property, then hashes FNV-1a(key_name, extracted_value).
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- hash_json(json_col, key) — raw JSON property hashing ---');
+
+    // Setup: table with id, value, and a JSON column
+    await conn.query(`
+      CREATE TABLE _json_src (
+        id      VARCHAR,
+        value   VARCHAR,
+        value_json JSON
+      );
+      INSERT INTO _json_src VALUES
+        ('u1', 'alice',  '{"name":"Alice","price":"9.99","category":"tools"}'),
+        ('u2', 'bob',    '{"name":"Bob","price":"24.99","category":"electronics"}'),
+        ('u3', 'carol',  '{"name":"Carol","price":"4.50","category":"tools"}'),
+        ('u4', 'noname', '{"price":"1.00"}');
+    `);
+
+    // hash_json returns UINTEGER — check it's non-null and deterministic for a known row.
+    r = await conn.query(
+      "SELECT (hash_json(value_json, 'name') IS NOT NULL AND " +
+      "        hash_json(value_json, 'name') = hash_json(value_json, 'name'))::VARCHAR AS ok " +
+      "FROM _json_src WHERE id = 'u1'"
+    );
+    check('hash_json_nonnull_deterministic', extractStr(r), 'true');
+
+    // Deterministic across rows
+    r = await conn.query(
+      "SELECT (hash_json(value_json, 'price') = hash_json(value_json, 'price'))::VARCHAR AS ok " +
+      "FROM _json_src WHERE id = 'u2'"
+    );
+    check('hash_json_deterministic', extractStr(r), 'true');
+
+    // Different keys → different hashes (same JSON)
+    r = await conn.query(
+      "SELECT (hash_json(value_json, 'name') <> hash_json(value_json, 'price'))::VARCHAR AS ok " +
+      "FROM _json_src WHERE id = 'u1'"
+    );
+    check('hash_json_different_keys_different_hash', extractStr(r), 'true');
+
+    // Missing key → NULL
+    r = await conn.query(
+      "SELECT (hash_json(value_json, 'name') IS NULL)::VARCHAR AS ok " +
+      "FROM _json_src WHERE id = 'u4'"
+    );
+    check('hash_json_missing_key_null', extractStr(r), 'true');
+
+    // Batch: all rows with 'name' key
+    r = await conn.query(
+      "SELECT (count(hash_json(value_json, 'name')) = 3)::VARCHAR AS ok FROM _json_src"
+    );
+    check('hash_json_batch_count_non_null', extractStr(r), 'true');
+
+    // hash_table on the id+value columns of the same table, side by side with hash_json
+    r = await conn.query(
+      "SELECT bool_and(h.hash = row_hash(s.id, s.value) AND hash_json(s.value_json, 'name') IS NOT NULL)::VARCHAR AS ok " +
+      "FROM (SELECT * FROM hash_table((SELECT id, value FROM _json_src WHERE id != 'u4'))) h " +
+      "JOIN _json_src s USING (id, value)"
+    );
+    check('hash_json_alongside_hash_table', extractStr(r), 'true');
+
+    // Performance: hash_json on 10M rows
+    // JSON format: {"v1":"<10-char string>","v2":<number>}
+    addLog('info', '');
+    addLog('info', '--- Performance: hash_json() 10M rows ---');
+
+    await conn.query(`
+      CREATE TABLE _json_perf AS
+        SELECT 'id'||i::VARCHAR AS id,
+               'val'||i::VARCHAR AS value,
+               ('{"v1":"' || printf('%010d', i % 10000000000) || '","v2":' || (i%100000)::VARCHAR || '}')::JSON AS value_json
+        FROM range(10000000) t(i)
+    `);
+
+    // Warm up
+    await conn.query("SELECT count(hash_json(value_json, 'v1')) FROM _json_perf LIMIT 100000");
+
+    const jp1 = performance.now();
+    await conn.query("SELECT count(hash_json(value_json, 'v1')) AS n FROM _json_perf");
+    const hashJsonMs = Math.round(performance.now() - jp1);
+    addLog('info', '  hash_json(json, \'v1\') 10M: ' + hashJsonMs + 'ms');
+    _results.push({ label: 'perf_hash_json_10m_ms', value: String(hashJsonMs) });
+
+    const jp2 = performance.now();
+    await conn.query("SELECT count(row_hash(id, value)) AS n FROM _json_perf");
+    const rowHashForJsonMs = Math.round(performance.now() - jp2);
+    addLog('info', '  row_hash(id,value) 10M:    ' + rowHashForJsonMs + 'ms (baseline)');
+    _results.push({ label: 'perf_hash_json_vs_row_hash', value: (hashJsonMs/Math.max(rowHashForJsonMs,1)).toFixed(2)+'x' });
+
+    // -------------------------------------------------------------------------
+    // Section 6: Performance: hash_table vs row_hash vs builtin hash()
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- Performance: hash_table() vs row_hash() vs builtin (10M rows) ---');
+
+    await conn.query(
+      "CREATE TABLE _perf AS SELECT 'id'||i::VARCHAR AS id, 'val'||i::VARCHAR AS value FROM range(10000000) t(i)"
+    );
+
+    // Warm up row_hash
+    await conn.query("SELECT count(row_hash(id, value)) FROM _perf LIMIT 100000");
+
+    const pt1 = performance.now();
+    await conn.query("SELECT count(row_hash(id, value)) AS n FROM _perf");
+    const scalarMs = Math.round(performance.now() - pt1);
+    addLog('info', '  row_hash() 10M: ' + scalarMs + 'ms');
+    _results.push({ label: 'perf_scalar_10m_ms', value: String(scalarMs) });
+
+    const pt2 = performance.now();
+    await conn.query("SELECT count(*) AS n FROM hash_table((SELECT * FROM _perf))");
+    const tableMs = Math.round(performance.now() - pt2);
+    addLog('info', '  hash_table() 10M: ' + tableMs + 'ms');
+    _results.push({ label: 'perf_table_10m_ms', value: String(tableMs) });
+
+    const pt3 = performance.now();
+    await conn.query("SELECT count(hash(id, value)) AS n FROM _perf");
+    const builtinMs2 = Math.round(performance.now() - pt3);
+    addLog('info', '  builtin hash() 10M: ' + builtinMs2 + 'ms');
+    _results.push({ label: 'perf_builtin_10m_ms', value: String(builtinMs2) });
+
+    addLog('info', '  hash_table/scalar ratio: ' + (tableMs / Math.max(scalarMs, 1)).toFixed(2) + 'x');
+    _results.push({ label: 'perf_table_vs_scalar_ratio', value: (tableMs / Math.max(scalarMs, 1)).toFixed(2) + 'x' });
+
+    // -------------------------------------------------------------------------
+    // Section 7: hash_row(struct, col_name) — struct scalar function
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- hash_row(row(id, value), col_name) ---');
+
+    // Use struct_pack(field := value) to create named structs from literals.
+    // row(col1, col2) from a real table preserves column names as field names.
+
+    // hash_row(struct_pack(id:='user1'), 'id') = row_hash('id', 'user1')
+    r = await conn.query("SELECT (hash_row(struct_pack(id := 'user1', value := 'hello'), 'id') = row_hash('id', 'user1'))::VARCHAR AS ok");
+    check('hash_row_matches_row_hash', extractStr(r), 'true');
+
+    // Same input → same hash (using struct_pack)
+    r = await conn.query("SELECT (hash_row(struct_pack(id := 'x', value := 'y'), 'id') = hash_row(struct_pack(id := 'x', value := 'y'), 'id'))::VARCHAR AS ok");
+    check('hash_row_deterministic', extractStr(r), 'true');
+
+    // Different field → different hash
+    r = await conn.query("SELECT (hash_row(struct_pack(id := 'u', value := 'v'), 'id') <> hash_row(struct_pack(id := 'u', value := 'v'), 'value'))::VARCHAR AS ok");
+    check('hash_row_different_field_different_hash', extractStr(r), 'true');
+
+    // struct_pack(col := col) from a real table — 100 rows
+    // Note: row(id, value) creates STRUCT(VARCHAR,VARCHAR) without field names in DuckDB 1.4;
+    // struct_pack(id := id, value := value) is required to name the fields.
+    r = await conn.query(
+      "SELECT bool_and(hash_row(struct_pack(id := id, value := value), 'id') = row_hash('id', id))::VARCHAR AS ok " +
+      "FROM (SELECT 'id'||i::VARCHAR AS id, 'val'||i::VARCHAR AS value FROM range(100) t(i)) t"
+    );
+    check('hash_row_bulk_matches_row_hash', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 8: Performance: hash_row(row(...), col) vs row_hash(id, value)
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- Performance: hash_row() vs row_hash() (10M rows) ---');
+
+    await conn.query("CREATE TABLE _hr_perf AS SELECT 'id'||i::VARCHAR AS id, 'val'||i::VARCHAR AS value FROM range(10000000) t(i)");
+
+    // Warm up
+    await conn.query("SELECT count(hash_row(struct_pack(id := id, value := value), 'id')) FROM _hr_perf LIMIT 100000");
+
+    const hr1 = performance.now();
+    await conn.query("SELECT count(hash_row(struct_pack(id := id, value := value), 'id')) AS n FROM _hr_perf");
+    const hashRowMs = Math.round(performance.now() - hr1);
+    addLog('info', '  hash_row(struct_pack(id:=id,...),\'id\') 10M: ' + hashRowMs + 'ms');
+    _results.push({ label: 'perf_hash_row_10m_ms', value: String(hashRowMs) });
+
+    const hr2 = performance.now();
+    await conn.query("SELECT count(row_hash(id, value)) AS n FROM _hr_perf");
+    const rowHashDirectMs = Math.round(performance.now() - hr2);
+    addLog('info', '  row_hash(id,value) 10M: ' + rowHashDirectMs + 'ms');
+    _results.push({ label: 'perf_row_hash_direct_10m_ms', value: String(rowHashDirectMs) });
+
+    addLog('info', '  hash_row/row_hash ratio: ' + (hashRowMs / Math.max(rowHashDirectMs, 1)).toFixed(2) + 'x (struct overhead)');
+    _results.push({ label: 'perf_hash_row_overhead', value: (hashRowMs / Math.max(rowHashDirectMs, 1)).toFixed(2) + 'x' });
+
+    // -------------------------------------------------------------------------
+    // Section 9: DuckDB built-in hash() type check
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- DuckDB built-in hash() comparison ---');
+
+    r = await conn.query("SELECT (typeof(hash('a','b')) = 'UBIGINT')::VARCHAR AS ok");
+    check('builtin_hash_is_ubigint', extractStr(r), 'true');
+
+    // -------------------------------------------------------------------------
+    // Section 10: hash_json_keys + hash_json_keys_table
+    //
+    // Recreates this DuckDB macro in Rust (scalar + table function):
+    //   create or replace macro create_value_hash(name_list, value_json) as
+    //     hash(name_list::varchar[] || json_extract_string(value_json, name_list::varchar[]));
+    //
+    // JSON format: {"v1":"<10-char string>","v2":<number>}
+    // 1M rows; compare DuckDB macro vs Rust scalar vs Rust table function.
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    addLog('info', '--- hash_json_keys / hash_json_keys_table vs DuckDB macro (1M rows) ---');
+
+    // Create DuckDB macro
+    await conn.query(`
+      CREATE OR REPLACE MACRO create_value_hash(name_list, value_json) AS
+        hash(name_list::VARCHAR[] || json_extract_string(value_json, name_list::VARCHAR[]))
+    `);
+
+    // Build 10M-row table: {"v1":"0000000001","v2":1}
+    addLog('info', '  Building big_json (10M rows)...');
+    const bt0 = performance.now();
+    await conn.query(`
+      CREATE TABLE big_json AS
+        SELECT
+          i::VARCHAR AS id,
+          ('{"v1":"' || printf('%010d', i % 10000000000) || '","v2":' || (i%100000)::VARCHAR || '}')::JSON AS value_json
+        FROM range(10000000) t(i)
+    `);
+    const buildMs = Math.round(performance.now() - bt0);
+    addLog('info', '  Table build: ' + buildMs + 'ms');
+    _results.push({ label: 'build_big_json_ms', value: String(buildMs) });
+
+    // Correctness: hash_json_keys deterministic
+    r = await conn.query(
+      "SELECT (hash_json_keys(['v1','v2'], '{\"v1\":\"hello\",\"v2\":42}') = " +
+      "        hash_json_keys(['v1','v2'], '{\"v1\":\"hello\",\"v2\":42}'))::VARCHAR AS ok"
+    );
+    check('hash_json_keys_deterministic', extractStr(r), 'true');
+
+    // Correctness: missing key → NULL
+    r = await conn.query(
+      "SELECT (hash_json_keys(['v1','missing'], '{\"v1\":\"x\"}') IS NULL)::VARCHAR AS ok"
+    );
+    check('hash_json_keys_missing_null', extractStr(r), 'true');
+
+    // Correctness: scalar and table function agree (sum over 1k rows, direct UINTEGER).
+    {
+      const rScalar = await conn.query(
+        "SELECT sum(hash_json_keys(['v1','v2'], value_json)::BIGINT)::VARCHAR AS s FROM (SELECT value_json FROM big_json LIMIT 1000) t"
+      );
+      const rTable  = await conn.query(
+        "SELECT sum(hash::BIGINT)::VARCHAR AS s FROM hash_json_keys_table((SELECT value_json FROM big_json LIMIT 1000), ['v1','v2'])"
+      );
+      const sScalar = extractStr(rScalar);
+      const sTable  = extractStr(rTable);
+      check('hash_json_keys_scalar_table_agree', sScalar === sTable ? 'true' : 'false', 'true');
+    }
+
+    // Warm up all three
+    await conn.query("SELECT count(create_value_hash(['v1','v2'], value_json)) FROM big_json LIMIT 100000");
+    await conn.query("SELECT count(hash_json_keys(['v1','v2'], value_json)) FROM big_json LIMIT 100000");
+    await conn.query("SELECT count(hash) FROM hash_json_keys_table((SELECT value_json FROM big_json LIMIT 100000), ['v1','v2'])");
+
+    addLog('info', '  Timing 10M rows...');
+
+    const m1 = performance.now();
+    await conn.query("SELECT count(create_value_hash(['v1','v2'], value_json)) AS n FROM big_json");
+    const macroMs = Math.round(performance.now() - m1);
+    addLog('info', '  DuckDB macro (hash + json_extract_string): ' + macroMs + 'ms');
+    _results.push({ label: 'perf_duckdb_macro_10m_ms', value: String(macroMs) });
+
+    const m2 = performance.now();
+    await conn.query("SELECT count(hash_json_keys(['v1','v2'], value_json)) AS n FROM big_json");
+    const scalarKeysMs = Math.round(performance.now() - m2);
+    addLog('info', '  hash_json_keys scalar (Rust FNV-1a):        ' + scalarKeysMs + 'ms');
+    _results.push({ label: 'perf_hash_json_keys_scalar_10m_ms', value: String(scalarKeysMs) });
+
+    const m3 = performance.now();
+    await conn.query("SELECT count(hash) AS n FROM hash_json_keys_table((SELECT value_json FROM big_json), ['v1','v2'])");
+    const tableKeysMs = Math.round(performance.now() - m3);
+    addLog('info', '  hash_json_keys_table (Rust streaming):      ' + tableKeysMs + 'ms');
+    _results.push({ label: 'perf_hash_json_keys_table_10m_ms', value: String(tableKeysMs) });
+
+    addLog('info', '  scalar/macro ratio:  ' + (scalarKeysMs/Math.max(macroMs,1)).toFixed(2)+'x');
+    addLog('info', '  table/macro ratio:   ' + (tableKeysMs/Math.max(macroMs,1)).toFixed(2)+'x');
+    _results.push({ label: 'perf_scalar_vs_macro', value: (scalarKeysMs/Math.max(macroMs,1)).toFixed(2)+'x' });
+    _results.push({ label: 'perf_table_vs_macro',  value: (tableKeysMs/Math.max(macroMs,1)).toFixed(2)+'x' });
+
+    // -------------------------------------------------------------------------
+    // Summary
+    // -------------------------------------------------------------------------
+    addLog('info', '');
+    if (fail === 0) {
+      addLog('info', '=== ALL TESTS PASSED (' + pass + '/' + (pass + fail) + ') ===');
+    } else {
+      addLog('error', '=== FAILED: ' + fail + '/' + (pass + fail) + ' tests failed ===');
+    }
+
+    await conn.close();
+    await db.terminate();
+    db = null;
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'Total time: ' + elapsed + 'ms');
+
+    if (fail > 0) {
+      sendReport('FAIL', { elapsed, pass, fail });
+    } else {
+      sendReport('PASS', { elapsed, bundle: 'coi', pass, fail });
+    }
+
+  } catch (e) {
+    addLog('error', 'FAILED: ' + e.message);
+    addLog('error', e.stack || '(no stack)');
+    if (db) {
+      try { await db.terminate(); } catch (x) { /* ignore */ }
+    }
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message, stack: e.stack || '' });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

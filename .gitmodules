@@ -41,3 +41,6 @@
 [submodule "submodules/lua"]
 	path = submodules/lua
 	url = https://github.com/lua/lua.git
+[submodule "submodules/duckdb_fts"]
+	path = submodules/duckdb_fts
+	url = https://github.com/duckdb/duckdb-fts.git

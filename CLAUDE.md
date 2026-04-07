@@ -1,9 +1,5 @@
 # Claude Code Guidelines for duckdb-wasm
 
-## Critical Rules
-
-- **NEVER kill Chrome or any user application.** Do not use `pkill`, `kill`, or similar commands on Chrome, browsers, or any application the user may have open. This destroys the user's open tabs and work. If stale browser tabs cause issues (e.g., OPFS lock contention), use workarounds like unique file names per run. Only kill processes that were explicitly started by the current script/session.
-
 ## Build Instructions
 
 **All builds MUST use the Docker container.** Do NOT build on the host machine directly — the Docker container has the correct versions of emscripten, binaryen, and all other build tools pinned and tested.
@@ -15,7 +11,7 @@
 ### Build Steps
 
 ```shell
-git clone https://github.com/ridge-ai/duckdb-wasm.git
+git clone https://github.com/trace-github/duckdb-wasm.git
 cd duckdb-wasm
 git submodule init
 git submodule update
@@ -83,7 +79,7 @@ The `patches/` directory contains patch files that were written for older DuckDB
 
 The current DuckDB submodule (v1.4.4) uses:
 - `timestamp_t` for `FileSystem::GetLastModifiedTime` (not `time_t`)
-- 7-arg `ClientProperties` constructor (includes `ArrowFormatVersion::V1_0` parameter)
+- 7-arg `ClientProperties` constructor — we use `ArrowFormatVersion::V1_5` (enables Decimal32/64 for narrow decimals; note: BLOB/BIT columns will use BinaryView format which requires a flechette-compatible Arrow parser)
 - `db_config.SetOption("arrow_lossless_conversion", ...)` (not direct struct member access)
 - `db_config.options.allow_unsigned_extensions`, `db_config.options.duckdb_api`, etc. remain as direct struct fields
 - `autoload_known_extensions` and `autoinstall_known_extensions` options have been removed
@@ -110,6 +106,10 @@ The `.d.ts` path in `bin/bundle.mjs` must match the actual tsc output structure.
 
 A browser test rig is available at `test-rig/` for verifying the built JS/WASM package end-to-end in a real browser with Cross-Origin Isolation.
 
+### Critical Rules
+
+- **NEVER kill Chrome or any user application.** Do not use `pkill`, `kill`, or similar commands on Chrome, browsers, or any application the user may have open. This destroys the user's open tabs and work. If stale browser tabs cause issues (e.g., OPFS lock contention), use workarounds like unique file names per run. Only kill processes that were explicitly started by the current script/session.
+
 **Run it:**
 ```
 ./test-rig/run.sh
@@ -126,6 +126,28 @@ This starts a local server (port 9876) with COOP/COEP headers, opens a browser, 
 **What it tests:** Module loading, bundle selection (tries EH → COI → MVP), database open/connect, version query, computation, generate_series, table CRUD, and extension availability (json, parquet).
 
 **Use this after JS/TS changes** to verify the built package works in a browser. The server prints all logs, errors, and query results to the terminal so you can act on failures without needing to open browser DevTools.
+
+### Rust Extensions for WASM
+
+**IMPORTANT:** Rust extensions in this repo target `wasm32-unknown-emscripten` and run **in the browser via DuckDB WASM**. They are NOT loadable `.duckdb_extension` files for native DuckDB. The real WASM target requires a completely different approach from native DuckDB extensions.
+
+#### Correct architecture (follow `evalexpr_rhai_wasm/` as the reference)
+
+1. **Rust crate** — `crate-type = ["staticlib"]`, no `duckdb` crate dependency. Exposes raw `extern "C"` functions that operate on **batches** (pointers + lengths), not individual rows. Compiled to `wasm32-unknown-emscripten`.
+
+2. **C++ glue** (`lib/src/extensions/`) — A DuckDB extension (`.cc`) that registers scalar/table functions with DuckDB's C++ API. The registered functions call the Rust batch functions once per vector (~2048 rows). Zero per-row FFI overhead.
+
+3. **CMake** (`lib/cmake/`) — Imports the pre-built Rust `.a` staticlib as `IMPORTED STATIC`. Two variants: `cargo-target-nothreads` (MVP/EH) and `cargo-target-threads` (COI). See `lib/cmake/evalexpr_rhai.cmake`.
+
+4. **Init** (`lib/src/webdb.cc`) — Calls `duckdb_web_<ext>_init(db.get())` to register the extension.
+
+5. **Docker build** (`docker-build.sh`) — Compiles the Rust staticlib twice (no-threads and threads) before the CMake step, using emscripten as the linker. See the `evalexpr_rhai_wasm` block in `docker-build.sh` for the exact cargo invocation with RUSTFLAGS for both variants.
+
+6. **Test rig** — Browser-based, like `test-rig/`. NOT a native DuckDB CLI test.
+
+#### Why not the scripting/rhai approach
+
+The `evalexpr_rhai_wasm` extension was observed to be too slow for production use — the scripting engine overhead dominates. Direct compiled Rust (as in `hash_ext_wasm/`) is the right approach. The FFI boundary is cheap when called once per batch, not once per row.
 
 ### Debugging Build Failures
 

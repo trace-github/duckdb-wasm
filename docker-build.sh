@@ -38,6 +38,30 @@ cargo +nightly build \
     --target wasm32-unknown-emscripten \
     --release \
     -Z build-std=std,panic_abort
+
+echo "=== Building hash_ext Rust library for WASM (no-threads) ==="
+cd /src/hash_ext_wasm
+CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER="emcc" \
+CC_wasm32_unknown_emscripten="emcc" \
+CXX_wasm32_unknown_emscripten="em++" \
+AR_wasm32_unknown_emscripten="emar" \
+CARGO_TARGET_DIR=/cache/cargo-target-hash-nothreads \
+cargo +nightly build \
+    --target wasm32-unknown-emscripten \
+    --release \
+    -Z build-std=core
+
+echo "=== Building hash_ext Rust library for WASM (threads/COI) ==="
+CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER="emcc" \
+CC_wasm32_unknown_emscripten="emcc" \
+CXX_wasm32_unknown_emscripten="em++" \
+AR_wasm32_unknown_emscripten="emar" \
+RUSTFLAGS="-C target-feature=+atomics,+bulk-memory" \
+CARGO_TARGET_DIR=/cache/cargo-target-hash-threads \
+cargo +nightly build \
+    --target wasm32-unknown-emscripten \
+    --release \
+    -Z build-std=core
 echo "=== Rust libraries built ==="
 cd /src
 

@@ -57,6 +57,8 @@
 #include "duckdb/web/extensions/tpcds_extension.h"
 #include "duckdb/web/extensions/tpch_extension.h"
 #include "duckdb/web/extensions/evalexpr_rhai_extension.h"
+#include "duckdb/web/extensions/fts_extension.h"
+#include "duckdb/web/extensions/hash_ext_extension.h"
 #include "duckdb/web/extensions/lua_extension.h"
 #include "duckdb/web/functions/table_function_relation.h"
 #include "duckdb/web/http_wasm.h"
@@ -125,7 +127,7 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::MaterializeQuer
     ArrowSchema raw_schema;
     bool lossless_conversion = webdb_.config_->arrow_lossless_conversion;
     ClientProperties options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion,
-                             ArrowFormatVersion::V1_0, connection_.context);
+                             ArrowFormatVersion::V1_5, connection_.context);
     unordered_map<idx_t, const shared_ptr<ArrowTypeExtensionData>> extension_type_cast;
     options.arrow_offset_size = ArrowOffsetSize::REGULAR;
     ArrowConverter::ToArrowSchema(&raw_schema, result->types, result->names, options);
@@ -163,7 +165,7 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::StreamQueryResu
     ArrowSchema raw_schema;
     bool lossless_conversion = webdb_.config_->arrow_lossless_conversion;
     ClientProperties options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion,
-                             ArrowFormatVersion::V1_0, connection_.context);
+                             ArrowFormatVersion::V1_5, connection_.context);
     options.arrow_offset_size = ArrowOffsetSize::REGULAR;
     ArrowConverter::ToArrowSchema(&raw_schema, current_query_result_->types, current_query_result_->names, options);
     ARROW_ASSIGN_OR_RAISE(current_schema_, arrow::ImportSchema(&raw_schema));
@@ -347,7 +349,7 @@ DuckDBWasmResultsWrapper WebDB::Connection::FetchQueryResults() {
         ArrowArray array;
         bool lossless_conversion = webdb_.config_->arrow_lossless_conversion;
         ClientProperties arrow_options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion,
-                                       ArrowFormatVersion::V1_0, connection_.context);
+                                       ArrowFormatVersion::V1_5, connection_.context);
         unordered_map<idx_t, const shared_ptr<ArrowTypeExtensionData>> extension_type_cast;
         arrow_options.arrow_offset_size = ArrowOffsetSize::REGULAR;
         ArrowConverter::ToArrowArray(*chunk, &array, arrow_options, extension_type_cast);
@@ -1000,6 +1002,8 @@ arrow::Status WebDB::Open(std::string_view args_json) {
         duckdb_web_tpcds_init(db.get());
         duckdb_web_tpch_init(db.get());
         duckdb_web_evalexpr_rhai_init(db.get());
+        duckdb_web_fts_init(db.get());
+        duckdb_web_hash_ext_init(db.get());
         duckdb_web_lua_init(db.get());
 #endif  // WASM_LOADABLE_EXTENSIONS
         RegisterCustomExtensionOptions(db);

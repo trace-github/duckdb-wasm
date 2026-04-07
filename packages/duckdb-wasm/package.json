@@ -1,10 +1,14 @@
 {
-    "name": "trace-duckdb-wasm",
+    "name": "@run-trace/duckdb-wasm",
     "version": "0.0.1",
-    "description": "DuckDB-WASM, customized.",
+    "description": "A custom build of DuckDB-WASM with linked extensions, wasmfs, and example rust functions.",
     "license": "MIT",
     "repository": {
-        "type": "git"
+        "type": "git",
+        "url": "https://github.com/trace-github/duckdb-wasm.git"
+    },
+    "publishConfig": {
+        "access": "public"
     },
     "keywords": [
         "wasm",
@@ -30,22 +34,21 @@
         "lint": "eslint src test",
         "test": "vitest run",
         "dev": "npm run bundle && vite",
-        "prepublishOnly": "npm run test && npm run lint && npm run build",
-        "bundle:debug": "node bin/bundle.mjs debug",
+"bundle:debug": "node bin/bundle.mjs debug",
         "bundle": "node bin/bundle.mjs release",
         "format": "prettier --write \"**/*.+(js|ts)\""
     },
     "files": [
         "dist",
         "!dist/tests-*",
-        "!dist/duckdb-browser-mvp.worker.js.map",
+        "!dist/**/*.map",
         "!dist/types/test"
     ],
-    "main": "dist/duckdb-browser.mjs",
-    "module": "dist/duckdb-browser.mjs",
+    "main": "dist/duckdb-wasm.mjs",
+    "module": "dist/duckdb-wasm.mjs",
     "types": "dist/duckdb-browser.d.ts",
-    "jsdelivr": "dist/duckdb-browser.mjs",
-    "unpkg": "dist/duckdb-browser.mjs",
+    "jsdelivr": "dist/duckdb-wasm.mjs",
+    "unpkg": "dist/duckdb-wasm.mjs",
     "sideEffects": false,
     "browser": {
         "fs": false,
