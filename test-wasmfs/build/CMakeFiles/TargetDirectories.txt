@@ -1,3 +1,0 @@
-/src/test-wasmfs/build/CMakeFiles/wasmfs_test.dir
-/src/test-wasmfs/build/CMakeFiles/edit_cache.dir
-/src/test-wasmfs/build/CMakeFiles/rebuild_cache.dir

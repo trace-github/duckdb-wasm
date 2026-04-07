@@ -24,6 +24,10 @@ compile_commands.json
 .DS_Store
 /node_modules
 /test-rig/node_modules
+/test-rig/arrow-bundle.mjs
+/test-rig/wasmfs_test.js
+/test-rig/wasmfs_test.wasm
+/test-wasmfs/build/
 .vscode
 !.vscode/settings.json
 data/tpch/**/*.parquet

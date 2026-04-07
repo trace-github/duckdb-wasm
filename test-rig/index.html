@@ -43,6 +43,8 @@ window.onunhandledrejection = function(e) {
 };
 </script>
 <script type="module">
+import { tableFromIPC } from '/arrow-bundle.mjs';
+
 async function tryBundle(mod, bundleConfig, label) {
   addLog('info', 'Trying ' + label + ' bundle...');
   const { duckdb, ConsoleLogger } = mod;
@@ -171,6 +173,26 @@ async function run() {
         addLog('info', 'Parquet extension OK (got expected file error)');
         _results.push({ label: 'parquet_ext', value: 'OK' });
       }
+    }
+
+    // Decimal parsing via apache-arrow
+    try {
+      const decBuf = await conn.query("SELECT 3.14::DECIMAL(9,2) AS d, 1234567890.12::DECIMAL(18,2) AS d2");
+      const tbl = tableFromIPC(decBuf);
+      const row = tbl.get(0);
+      const dScale = tbl.schema.fields.find(f => f.name === 'd').type.scale;
+      const d2Scale = tbl.schema.fields.find(f => f.name === 'd2').type.scale;
+      const d = Number(row.d) / Math.pow(10, dScale);
+      const d2 = Number(row.d2) / Math.pow(10, d2Scale);
+      if (Math.abs(d - 3.14) > 0.001 || Math.abs(d2 - 1234567890.12) > 0.01) {
+        throw new Error('Decimal values incorrect: ' + d + ', ' + d2);
+      }
+      addLog('info', 'Decimal parsing OK (' + d + ', ' + d2 + ')');
+      _results.push({ label: 'decimal_parse', value: 'OK' });
+    } catch (decErr) {
+      addLog('error', 'Decimal parsing FAILED: ' + decErr.message);
+      _results.push({ label: 'decimal_parse', value: 'FAILED: ' + decErr.message });
+      throw decErr;
     }
 
     const elapsed = Date.now() - t0;
