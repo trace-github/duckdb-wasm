@@ -2,7 +2,7 @@
     "private": true,
     "scripts": {
         "build": "make build_wasm_all",
-        "test": "./run-tests.sh"
+        "test": "./scripts/run-tests.sh"
     },
     "workspaces": [
         "packages/*"

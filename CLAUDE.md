@@ -15,7 +15,7 @@ git clone https://github.com/trace-github/duckdb-wasm.git
 cd duckdb-wasm
 git submodule init
 git submodule update
-./build-wasm.sh
+./scripts/build-wasm.sh
 ```
 
 This builds the Docker image (first time only), then builds all three WASM targets (MVP, EH, COI) and the JS/TS package inside the container.
@@ -37,13 +37,13 @@ A `duckdb-wasm-cache` Docker volume persists ccache across runs:
 ### Docker Build Details
 
 - **`Dockerfile`** — Debian image with emscripten 4.0.3 (includes binaryen v126), ccache, Node 20
-- **`docker-build.sh`** — Entrypoint script. Uses `build-docker/` as build prefix to avoid CMake cache conflicts with any host builds
-- **`build-wasm.sh`** — Host-side wrapper. Builds the image, creates the cache volume, bind-mounts the repo, runs the build
+- **`scripts/docker-build.sh`** — Entrypoint script (copied into the image). Uses `build-docker/` as build prefix to avoid CMake cache conflicts with any host builds
+- **`scripts/build-wasm.sh`** — Host-side wrapper. Builds the image, creates the cache volume, bind-mounts the repo, runs the build
 - The `DUCKDB_WASM_BUILD_PREFIX` env var in `scripts/wasm_build_lib.sh` controls the build output directory (defaults to `${PROJECT_ROOT}/build` for native, set to `/src/build-docker` in Docker)
 
 ### Common Pitfalls
 
-- **Do NOT build on the host machine.** Always use `./build-wasm.sh` or run via Docker.
+- **Do NOT build on the host machine.** Always use `./scripts/build-wasm.sh` or run via Docker.
 - **Do NOT run `npm run build` from the repo root.** The root `package.json` maps `build` to `make build_wasm_all`, which triggers a full WASM recompile.
 - **Do NOT run `make apply_patches`.** The patches were written for an older DuckDB and fail against v1.4.4. The build succeeds without them.
 
@@ -76,6 +76,9 @@ The `patches/` directory contains patch files that were written for older DuckDB
 - Extension init calls are in `lib/src/webdb.cc` (see `duckdb_web_*_init` functions)
 - Emscripten 4.0.3 is pinned in the Dockerfile. Do not change the version.
 - Binaryen v126 is bundled with emscripten 4.0.3 (supports `--enable-bulk-memory-opt`)
+- Arrow COI build: `-msimd128` is stripped from Arrow's compile flags in `lib/cmake/arrow.cmake`. This is required because Arrow 17.0.0's vendored xxhash conditionally includes `arm_neon.h` when `__wasm_simd128__` is defined but does so inside an `extern "C"` block, breaking Emscripten's `em_asm.h` C++ templates. Arrow's SIMD is disabled (`ARROW_SIMD_LEVEL=NONE`) so this flag is safe to strip.
+- Emscripten 4.x no longer generates a separate `duckdb_wasm.worker.js` pthread file. `scripts/wasm_build_lib.sh` generates a `duckdb-coi.pthread.js` stub that works with Emscripten 4.x's new protocol (the COI JS itself handles pthread init when loaded with `{ name: "em-pthread" }`).
+- The `packages/duckdb-wasm/src/targets/duckdb-browser-coi.pthread.worker.ts` worker uses Emscripten 4.x's `handleMessage`/`startWorker` protocol: forwards `load` to Emscripten's handler, overrides `startWorker` to capture the module instance, then re-registers DuckDB-specific handlers.
 
 ### DuckDB v1.4.4 API Notes
 
@@ -112,20 +115,25 @@ A browser test rig is available at `test-rig/` for verifying the built JS/WASM p
 
 - **NEVER kill Chrome or any user application.** Do not use `pkill`, `kill`, or similar commands on Chrome, browsers, or any application the user may have open. This destroys the user's open tabs and work. If stale browser tabs cause issues (e.g., OPFS lock contention), use workarounds like unique file names per run. Only kill processes that were explicitly started by the current script/session.
 
-**Run it:**
+**Run the full test suite:**
 ```
-./test-rig/run.sh
+./scripts/run-tests.sh
 ```
 
-This starts a local server (port 9876) with COOP/COEP headers, opens a browser, loads the built `dist/` package, runs diagnostic queries, and reports results back to stdout. Exit code 0 = PASS, 1 = FAIL, 2 = timeout.
+This runs all browser test suites sequentially. Exit code 0 = all passed.
 
-**Options:**
-- `--keep-alive` — Keep server running after report (for iterating in the browser)
-- `--no-open` — Don't auto-open browser
-- `--port PORT` — Custom port (default 9876)
-- `--timeout MS` — Custom timeout (default 60s)
+**Run a single test:**
+```
+node test-rig/puppeteer-run.mjs [--coi | --opfs-persist | --db-stress | --file-stress | --hash-ext | --evalexpr | --lua | --buffer-reg | --metric-table | --wasmfs]
+```
 
-**What it tests:** Module loading, bundle selection (tries EH → COI → MVP), database open/connect, version query, computation, generate_series, table CRUD, and extension availability (json, parquet).
+Options: `--keep-alive` (keep server/browser open), `--port PORT`, `--timeout MS`.
+
+**Smoke test** (`./scripts/run-tests.sh` with no flag) tests EH/COI/MVP bundle selection, DuckDB version, queries, extensions, and decimal parsing via Apache Arrow IPC.
+
+**WasmFS OPFS test** uses a C program compiled by the Docker build. The `wasmfs_test.js`/`.wasm` files are produced by `./scripts/build-wasm.sh` and copied into `test-rig/` automatically.
+
+**Arrow bundle** (`test-rig/arrow-bundle.mjs`) is a bundled version of `apache-arrow` for browser use. It is gitignored (not committed) and is built by `./scripts/build-wasm.sh` as part of the normal Docker build. To rebuild it manually: `cd test-rig && npm run build`.
 
 **Use this after JS/TS changes** to verify the built package works in a browser. The server prints all logs, errors, and query results to the terminal so you can act on failures without needing to open browser DevTools.
 
@@ -143,7 +151,7 @@ This starts a local server (port 9876) with COOP/COEP headers, opens a browser, 
 
 4. **Init** (`lib/src/webdb.cc`) — Calls `duckdb_web_<ext>_init(db.get())` to register the extension.
 
-5. **Docker build** (`docker-build.sh`) — Compiles the Rust staticlib twice (no-threads and threads) before the CMake step, using emscripten as the linker. See the `evalexpr_rhai_wasm` block in `docker-build.sh` for the exact cargo invocation with RUSTFLAGS for both variants.
+5. **Docker build** (`scripts/docker-build.sh`) — Compiles the Rust staticlib twice (no-threads and threads) before the CMake step, using emscripten as the linker. See the `evalexpr_rhai_wasm` block in `scripts/docker-build.sh` for the exact cargo invocation with RUSTFLAGS for both variants.
 
 6. **Test rig** — Browser-based, like `test-rig/`. NOT a native DuckDB CLI test.
 

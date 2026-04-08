@@ -2,8 +2,14 @@
   "name": "duckdb-wasm-test-rig",
   "private": true,
   "type": "module",
+  "scripts": {
+    "build": "./build.sh"
+  },
   "dependencies": {
     "apache-arrow": "^18.0.0",
     "puppeteer-core": "^24.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
   }
 }

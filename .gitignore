@@ -27,6 +27,7 @@ compile_commands.json
 /test-rig/arrow-bundle.mjs
 /test-rig/wasmfs_test.js
 /test-rig/wasmfs_test.wasm
+/.claude/
 /test-wasmfs/build/
 .vscode
 !.vscode/settings.json

@@ -1,6 +1,11 @@
 include(ExternalProject)
 
 set(ARROW_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+# Strip -msimd128 from Arrow's flags: xxhash (vendored in Arrow) conditionally
+# includes arm_neon.h when __wasm_simd128__ is defined, but does so inside an
+# extern "C" block, which breaks Emscripten's em_asm.h C++ templates.
+# Arrow's SIMD is already disabled via ARROW_SIMD_LEVEL=NONE.
+string(REPLACE "-msimd128" "" ARROW_CXX_FLAGS "${ARROW_CXX_FLAGS}")
 
 set(ARROW_FLAGS
     -G${CMAKE_GENERATOR}

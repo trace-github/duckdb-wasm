@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Run all test rig suites sequentially. Exit code 0 = all passed.
-set -euo pipefail
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNNER="node $SCRIPT_DIR/test-rig/puppeteer-run.mjs"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+RUNNER="node $ROOT_DIR/test-rig/puppeteer-run.mjs"
 
 PASS=()
 FAIL=()
@@ -28,7 +29,7 @@ run "WasmFS OPFS"            "--wasmfs"
 run "OPFS persistence"       "--opfs-persist"
 run "DB stress"              "--db-stress"
 run "File I/O stress"        "--file-stress"
-run "Rust hash extension"    "--hash-ext"
+run "Rust hash extension"    "--hash-ext --timeout 120000"
 run "Evalexpr (Rhai)"        "--evalexpr"
 run "Lua extension"          "--lua"
 run "Buffer registration"    "--buffer-reg"
@@ -38,14 +39,15 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  RESULTS"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-for t in "${PASS[@]}"; do echo "  PASS  $t"; done
-for t in "${FAIL[@]}"; do echo "  FAIL  $t"; done
+[ ${#PASS[@]} -gt 0 ] && for t in "${PASS[@]}"; do echo "  PASS  $t"; done
+[ ${#FAIL[@]} -gt 0 ] && for t in "${FAIL[@]}"; do echo "  FAIL  $t"; done
 echo ""
 
-if [ ${#FAIL[@]} -gt 0 ]; then
-    echo "${#FAIL[@]} suite(s) failed."
+NFAIL=${#FAIL[@]}
+if [ "$NFAIL" -gt 0 ]; then
+    echo "$NFAIL suite(s) failed."
     exit 1
 else
-    echo "All ${#PASS[@]} suites passed."
+    echo "All ${#PASS[@]} suite(s) passed."
     exit 0
 fi

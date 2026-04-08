@@ -114,4 +114,12 @@ if [ -f ${BUILD_DIR}/duckdb_wasm.worker.js ]; then
   # More info: duckdb-browser-async-coi.pthread.worker.ts
   printf "\nexport const onmessage = self.onmessage;\nexport function getModule() { return Module; }\nexport function setModule(m) { Module = m; }\n" \
     >> ${DUCKDB_LIB_DIR}/duckdb${SUFFIX}.pthread.js
+else
+  # Emscripten 4.x no longer generates a separate pthread worker JS file.
+  # Instead, the main module handles pthread mode when loaded with {name:"em-pthread"}.
+  # The main module sets self.onmessage and self.alert synchronously when
+  # ENVIRONMENT_IS_PTHREAD=true. This stub captures those handlers by requiring
+  # the main JS first (ensuring it evaluates before this stub in the esbuild bundle).
+  printf "// Emscripten 4.x pthread stub\nrequire('./duckdb${SUFFIX}.js');\nvar onmessage = typeof self !== 'undefined' ? self.onmessage : null;\nvar alert = typeof self !== 'undefined' ? self.alert : null;\nvar _module = {};\nfunction getModule() { return _module; }\nfunction setModule(m) { _module = m; }\nmodule.exports = { onmessage: onmessage, alert: alert, getModule: getModule, setModule: setModule };\nmodule.exports.default = module.exports;\n" \
+    > ${DUCKDB_LIB_DIR}/duckdb${SUFFIX}.pthread.js
 fi

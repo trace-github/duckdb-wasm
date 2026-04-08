@@ -12,6 +12,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMAGE_NAME="duckdb-wasm-builder"
 CACHE_VOLUME="duckdb-wasm-cache"
 
@@ -22,13 +23,13 @@ if [[ "${1:-}" == "--no-cache" ]]; then
 fi
 
 echo "=== Building Docker image ==="
-docker build $DOCKER_BUILD_ARGS -t "$IMAGE_NAME" "$SCRIPT_DIR"
+docker build $DOCKER_BUILD_ARGS -t "$IMAGE_NAME" "$ROOT_DIR"
 
 docker volume create "$CACHE_VOLUME" 2>/dev/null || true
 
 echo "=== Running build ==="
 docker run --rm \
-    -v "$SCRIPT_DIR":/src \
+    -v "$ROOT_DIR":/src \
     -v "$CACHE_VOLUME":/cache \
     "$IMAGE_NAME"
 

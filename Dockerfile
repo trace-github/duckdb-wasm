@@ -50,7 +50,7 @@ ENV CARGO_TARGET_DIR=/cache/cargo-target
 
 WORKDIR /src
 
-COPY docker-build.sh /usr/local/bin/docker-build.sh
+COPY scripts/docker-build.sh /usr/local/bin/docker-build.sh
 RUN chmod +x /usr/local/bin/docker-build.sh
 
 ENTRYPOINT ["/usr/local/bin/docker-build.sh"]

@@ -73,4 +73,17 @@ cd packages/duckdb-wasm
 npm install
 npx vite build && node bin/bundle.mjs release && npx tsc
 
+echo "=== Building test-rig Arrow bundle ==="
+cd /src/test-rig
+npm run build
+
+echo "=== Building WasmFS test program ==="
+cd /src/test-wasmfs
+mkdir -p build && cd build
+emcmake cmake .. -DWITH_THREADS=ON -DCMAKE_BUILD_TYPE=Release
+emmake make -j$(nproc)
+cp wasmfs_test.js /src/test-rig/
+cp wasmfs_test.wasm /src/test-rig/
+if [ -f wasmfs_test.worker.js ]; then cp wasmfs_test.worker.js /src/test-rig/; fi
+
 echo "=== Build complete ==="
