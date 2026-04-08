@@ -1,6 +1,6 @@
 {
     "name": "@run-trace/duckdb-wasm",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "description": "A custom build of DuckDB-WASM with linked extensions, wasmfs, and example rust functions.",
     "license": "MIT",
     "repository": {
@@ -41,7 +41,6 @@
     "files": [
         "dist",
         "!dist/tests-*",
-        "!dist/**/*.map",
         "!dist/types/test"
     ],
     "main": "dist/duckdb-wasm.mjs",

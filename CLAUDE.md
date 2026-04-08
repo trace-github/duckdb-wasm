@@ -53,13 +53,15 @@ A `duckdb-wasm-cache` Docker volume persists ccache across runs:
 
 ### Submodules
 
-DO NOT modify files in `submodules/` (duckdb, arrow, rapidjson) unless explicitly asked. The WASM build compiles against unmodified upstream sources.
+**NEVER commit changes inside a submodule directory.** All submodule commits must point to publicly reachable commits in the upstream remote. A local-only commit in a submodule will break `git submodule update` for every other developer.
 
-If a build error appears to originate from submodule code, investigate whether the issue is in our build configuration (cmake flags, link order, missing defines) or in our wrapper code (`lib/src/`, `lib/include/`) before modifying upstream source.
+DO NOT modify files in `submodules/` (duckdb, arrow, rapidjson, lua, duckdb_lua, duckdb_fts, evalexpr_rhai, etc.) unless explicitly asked. The WASM build compiles against unmodified upstream sources.
 
-**Current submodule versions (as of 2026-03-10):**
+If a build error appears to originate from submodule code, investigate whether the issue is in our build configuration (cmake flags, link order, missing defines) or in our wrapper code (`lib/src/`, `lib/include/`) before modifying upstream source. If an upstream fix is truly required, put it in `patches/` and apply it in the Docker build script — do not commit it directly into the submodule.
+
+**Current submodule versions (as of 2026-04-07):**
 - DuckDB: `6ddac802ff` (v1.4.4)
-- Arrow: `apache-arrow-17.0.0`
+- Arrow: `6a2e19a852` (apache-arrow-17.0.0)
 - RapidJSON: `973dc9c06d`
 
 ### Patches (OUTDATED - DO NOT APPLY)

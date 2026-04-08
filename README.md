@@ -30,3 +30,4 @@ Requires Docker Desktop (16 GiB memory recommended). See [CLAUDE.md](CLAUDE.md) 
 | --- | :--- | :--- |
 | [duckdb_wasm](/lib) | Wasm Library | C++ |
 | [@run-trace/duckdb-wasm](/packages/duckdb-wasm) | TypeScript API | TypeScript |
+ yes, 

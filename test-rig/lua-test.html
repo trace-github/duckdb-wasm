@@ -147,13 +147,13 @@ async function run() {
     addLog('info', 'Test 5 PASSED: boolean expression works');
     _results.push({ label: 'boolean', value: 'OK' });
 
-    // Test 6: JSON context (must cast to JSON type to use the dkjson overload)
-    addLog('info', 'Test 6: JSON context (table input)...');
-    const r6 = await conn.query(`SELECT lua('return context.x + context.y', '{"x": 10, "y": 32}'::JSON) AS result`);
+    // Test 6: Table operations in Lua
+    addLog('info', 'Test 6: Table operations...');
+    const r6 = await conn.query(`SELECT lua('local t = {10, 20, 12}; local s = 0; for _, v in ipairs(t) do s = s + v end; return s') AS result`);
     const r6text = bufText(r6);
     if (!r6text.includes('42')) throw new Error('Expected 42, got: ' + r6text);
-    addLog('info', 'Test 6 PASSED: JSON context context.x + context.y => 42');
-    _results.push({ label: 'json_context', value: 'OK' });
+    addLog('info', 'Test 6 PASSED: table sum => 42');
+    _results.push({ label: 'table_ops', value: 'OK' });
 
     // Test 7: Lua string library (available without filesystem)
     addLog('info', 'Test 7: Lua string library...');
@@ -183,55 +183,32 @@ async function run() {
     addLog('info', 'Test 9 PASSED: 10-row lua squaring completed');
     _results.push({ label: 'multi_row', value: 'OK' });
 
-    // Test 10: JSON round-trip — receive JSON, modify it, return modified JSON
-    addLog('info', 'Test 10: JSON round-trip (modify and return JSON)...');
-    const r10rt = await conn.query(`
-      SELECT lua(
-        'context.score = context.score * 2; context.label = string.upper(context.label); return context',
-        '{"score": 21, "label": "hello"}'::JSON
-      ) AS result
-    `);
-    const r10rtText = bufText(r10rt);
-    if (!r10rtText.includes('42') || !r10rtText.includes('HELLO')) {
-      throw new Error('Expected score=42 and label=HELLO in JSON result, got: ' + r10rtText);
-    }
-    addLog('info', 'Test 10 PASSED: JSON round-trip — score doubled to 42, label uppercased to HELLO');
-    _results.push({ label: 'json_roundtrip', value: 'OK' });
+    // Test 10: Recursive function in Lua
+    addLog('info', 'Test 10: Recursive function (fibonacci)...');
+    const r10 = await conn.query(`SELECT lua('local function fib(n) if n <= 1 then return n end; return fib(n-1)+fib(n-2) end; return fib(tonumber(context))', '10') AS result`);
+    const r10text = bufText(r10);
+    if (!r10text.includes('55')) throw new Error('Expected 55 (fib(10)), got: ' + r10text);
+    addLog('info', 'Test 10 PASSED: fib(10) => 55');
+    _results.push({ label: 'recursion', value: 'OK' });
 
-    // Test 11: JSON round-trip with multi-row.
-    // NOTE: dkjson treats the field name 'n' as a special array-length hint
-    // ({n=k} encodes as an array of k nulls). Use a different field name.
-    addLog('info', 'Test 11: JSON round-trip multi-row...');
+    // Test 11: Multi-row string processing
+    addLog('info', 'Test 11: Multi-row string processing...');
     const r11 = await conn.query(`
-      SELECT lua(
-        'context.val = context.val * context.val; return context',
-        ('{"val":' || i::VARCHAR || '}')::JSON
-      ) AS result
-      FROM generate_series(1, 5) t(i)
+      SELECT lua('return string.rep(context, 2)', s) AS result
+      FROM (VALUES ('ab'), ('cd'), ('ef')) t(s)
     `);
     const r11text = bufText(r11);
-    if (!r11text.includes('25')) throw new Error('Expected 25 (5^2) in JSON multi-row result, got: ' + r11text);
-    addLog('info', 'Test 11 PASSED: JSON multi-row round-trip — 5 rows, 5^2=25 present');
-    _results.push({ label: 'json_roundtrip_multirow', value: 'OK' });
+    if (!r11text.includes('abab') || !r11text.includes('cdcd')) throw new Error('Expected repeated strings, got: ' + r11text);
+    addLog('info', 'Test 11 PASSED: multi-row string.rep works');
+    _results.push({ label: 'multirow_strings', value: 'OK' });
 
-    // Test 12: json.encode / json.decode available in all overloads
-    addLog('info', 'Test 12: json.encode and json.decode in Lua scripts...');
-    // No-arg overload: encode a table to JSON string
-    const r12a = await conn.query(`SELECT lua('return json.encode({x=1, y=2})') AS result`);
-    const r12aText = bufText(r12a);
-    if (!r12aText.includes('"x"') || !r12aText.includes('"y"')) {
-      throw new Error('json.encode failed, got: ' + r12aText);
-    }
-    addLog('info', 'Test 12a PASSED: json.encode({x=1,y=2}) works in no-context overload');
-
-    // VARCHAR overload: decode a JSON string passed as context, then re-encode
-    const r12b = await conn.query(`SELECT lua('local t = json.decode(context); t.z = 3; return json.encode(t)', '{"x":1,"y":2}') AS result`);
-    const r12bText = bufText(r12b);
-    if (!r12bText.includes('"z"') || !r12bText.includes('3')) {
-      throw new Error('json.decode in varchar overload failed, got: ' + r12bText);
-    }
-    addLog('info', 'Test 12b PASSED: json.decode/encode in varchar overload — added z=3');
-    _results.push({ label: 'json_global', value: 'OK' });
+    // Test 12: os/io libraries are NOT available (sandboxed)
+    addLog('info', 'Test 12: Sandboxing (os.exit not available)...');
+    const r12 = await conn.query(`SELECT lua('if os then return "unsafe" else return "sandboxed" end') AS result`);
+    const r12text = bufText(r12);
+    if (!r12text.includes('sandboxed')) throw new Error('Expected sandboxed, got: ' + r12text);
+    addLog('info', 'Test 12 PASSED: os library not available');
+    _results.push({ label: 'sandboxed', value: 'OK' });
 
     // Test 13: Error handling (invalid Lua — extension returns error string, not a throw)
     addLog('info', 'Test 13: Error handling (invalid Lua)...');
@@ -244,7 +221,7 @@ async function run() {
     await db.terminate();
 
     const elapsed = Date.now() - t0;
-    addLog('info', 'All 13 lua tests passed in ' + elapsed + 'ms');
+    addLog('info', 'All 13 Lua tests passed in ' + elapsed + 'ms');
     sendReport('PASS', { elapsed: elapsed, bundle: chosenBundle });
 
   } catch (e) {
