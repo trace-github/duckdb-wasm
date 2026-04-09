@@ -53,11 +53,16 @@ A `duckdb-wasm-cache` Docker volume persists ccache across runs:
 
 ### Submodules
 
-**NEVER commit changes inside a submodule directory.** All submodule commits must point to publicly reachable commits in the upstream remote. A local-only commit in a submodule will break `git submodule update` for every other developer.
+**ABSOLUTE RULE: NEVER modify any file under `submodules/`.** This means do not edit, patch, or overwrite any file whose path starts with `submodules/` — not `submodules/arrow/`, not `submodules/duckdb/`, not any other. This rule has been violated repeatedly and causes real issues: local submodule changes cannot be committed to the parent repo and break `git submodule update` for every developer on every machine.
 
-DO NOT modify files in `submodules/` (duckdb, arrow, rapidjson, lua, duckdb_lua, duckdb_fts, evalexpr_rhai, etc.) unless explicitly asked. The WASM build compiles against unmodified upstream sources.
+**Before editing any file, check its path. If it starts with `submodules/`, stop.**
 
-If a build error appears to originate from submodule code, investigate whether the issue is in our build configuration (cmake flags, link order, missing defines) or in our wrapper code (`lib/src/`, `lib/include/`) before modifying upstream source. If an upstream fix is truly required, put it in `patches/` and apply it in the Docker build script — do not commit it directly into the submodule.
+If you have accidentally modified a submodule file, revert it immediately:
+```
+git -C submodules/<name> checkout -- <file>
+```
+
+If a build error appears to originate from submodule code, investigate whether the issue is in our build configuration (cmake flags, link order, missing defines) or in our wrapper code (`lib/src/`, `lib/include/`) before modifying upstream source. If an upstream fix is truly required, put it in `patches/` and apply it in the Docker build script — do not modify the submodule source directly.
 
 **Current submodule versions (as of 2026-04-07):**
 - DuckDB: `6ddac802ff` (v1.4.4)

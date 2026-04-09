@@ -104,7 +104,7 @@ async function run() {
     await db.open({ maximumThreads: 4 });
     addLog('info', 'Database opened (in-memory, 4 threads)');
 
-    const conn = await db.connect();
+    let conn = await db.connect();
     addLog('info', 'Connected');
 
     const vbuf = await conn.query("SELECT version() AS v");
@@ -373,6 +373,9 @@ async function run() {
     const rowHashForJsonMs = Math.round(performance.now() - jp2);
     addLog('info', '  row_hash(id,value) 10M:    ' + rowHashForJsonMs + 'ms (baseline)');
     _results.push({ label: 'perf_hash_json_vs_row_hash', value: (hashJsonMs/Math.max(rowHashForJsonMs,1)).toFixed(2)+'x' });
+    await conn.query("DROP TABLE IF EXISTS _json_perf");
+    await conn.close(); 
+    conn = await db.connect();
 
     // -------------------------------------------------------------------------
     // Section 6: Performance: hash_table vs row_hash vs builtin hash()
@@ -407,6 +410,9 @@ async function run() {
 
     addLog('info', '  hash_table/scalar ratio: ' + (tableMs / Math.max(scalarMs, 1)).toFixed(2) + 'x');
     _results.push({ label: 'perf_table_vs_scalar_ratio', value: (tableMs / Math.max(scalarMs, 1)).toFixed(2) + 'x' });
+    await conn.query("DROP TABLE IF EXISTS _perf");
+    await conn.close();
+    conn = await db.connect();
 
     // -------------------------------------------------------------------------
     // Section 7: hash_row(struct, col_name) — struct scalar function
@@ -463,6 +469,9 @@ async function run() {
 
     addLog('info', '  hash_row/row_hash ratio: ' + (hashRowMs / Math.max(rowHashDirectMs, 1)).toFixed(2) + 'x (struct overhead)');
     _results.push({ label: 'perf_hash_row_overhead', value: (hashRowMs / Math.max(rowHashDirectMs, 1)).toFixed(2) + 'x' });
+    await conn.query("DROP TABLE IF EXISTS _hr_perf");
+    await conn.close(); 
+    conn = await db.connect();
 
     // -------------------------------------------------------------------------
     // Section 9: DuckDB built-in hash() type check
