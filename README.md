@@ -19,7 +19,7 @@ git clone https://github.com/trace-github/duckdb-wasm.git
 cd duckdb-wasm
 git submodule init
 git submodule update
-./scripts/build-wasm.sh
+./trace-scripts/build-wasm.sh
 ```
 
 Requires Docker Desktop (16 GiB memory recommended). See [CLAUDE.md](CLAUDE.md) for full build details.

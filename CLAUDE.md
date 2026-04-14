@@ -15,7 +15,7 @@ git clone https://github.com/trace-github/duckdb-wasm.git
 cd duckdb-wasm
 git submodule init
 git submodule update
-./scripts/build-wasm.sh
+./trace-scripts/build-wasm.sh
 ```
 
 This builds the Docker image (first time only), then builds all three WASM targets (MVP, EH, COI) and the JS/TS package inside the container.
@@ -37,13 +37,13 @@ A `duckdb-wasm-cache` Docker volume persists ccache across runs:
 ### Docker Build Details
 
 - **`Dockerfile`** — Debian image with emscripten 4.0.3 (includes binaryen v126), ccache, Node 20
-- **`scripts/docker-build.sh`** — Entrypoint script (copied into the image). Uses `build-docker/` as build prefix to avoid CMake cache conflicts with any host builds
-- **`scripts/build-wasm.sh`** — Host-side wrapper. Builds the image, creates the cache volume, bind-mounts the repo, runs the build
+- **`trace-scripts/docker-build.sh`** — Entrypoint script (copied into the image). Uses `build-docker/` as build prefix to avoid CMake cache conflicts with any host builds
+- **`trace-scripts/build-wasm.sh`** — Host-side wrapper. Builds the image, creates the cache volume, bind-mounts the repo, runs the build
 - The `DUCKDB_WASM_BUILD_PREFIX` env var in `scripts/wasm_build_lib.sh` controls the build output directory (defaults to `${PROJECT_ROOT}/build` for native, set to `/src/build-docker` in Docker)
 
 ### Common Pitfalls
 
-- **Do NOT build on the host machine.** Always use `./scripts/build-wasm.sh` or run via Docker.
+- **Do NOT build on the host machine.** Always use `./trace-scripts/build-wasm.sh` or run via Docker.
 - **Do NOT run `npm run build` from the repo root.** The root `package.json` maps `build` to `make build_wasm_all`, which triggers a full WASM recompile.
 - **Do NOT run `make apply_patches`.** The patches were written for an older DuckDB and fail against v1.4.4. The build succeeds without them.
 
@@ -122,7 +122,7 @@ A browser test rig is available at `test-rig/` for verifying the built JS/WASM p
 
 **Run the full test suite:**
 ```
-./scripts/run-tests.sh
+./trace-scripts/run-tests.sh
 ```
 
 This runs all browser test suites sequentially. Exit code 0 = all passed.
@@ -134,11 +134,11 @@ node test-rig/puppeteer-run.mjs [--coi | --opfs-persist | --db-stress | --file-s
 
 Options: `--keep-alive` (keep server/browser open), `--port PORT`, `--timeout MS`.
 
-**Smoke test** (`./scripts/run-tests.sh` with no flag) tests EH/COI/MVP bundle selection, DuckDB version, queries, extensions, and decimal parsing via Apache Arrow IPC.
+**Smoke test** (`./trace-scripts/run-tests.sh` with no flag) tests EH/COI/MVP bundle selection, DuckDB version, queries, extensions, and decimal parsing via Apache Arrow IPC.
 
-**WasmFS OPFS test** uses a C program compiled by the Docker build. The `wasmfs_test.js`/`.wasm` files are produced by `./scripts/build-wasm.sh` and copied into `test-rig/` automatically.
+**WasmFS OPFS test** uses a C program compiled by the Docker build. The `wasmfs_test.js`/`.wasm` files are produced by `./trace-scripts/build-wasm.sh` and copied into `test-rig/` automatically.
 
-**Arrow bundle** (`test-rig/arrow-bundle.mjs`) is a bundled version of `apache-arrow` for browser use. It is gitignored (not committed) and is built by `./scripts/build-wasm.sh` as part of the normal Docker build. To rebuild it manually: `cd test-rig && npm run build`.
+**Arrow bundle** (`test-rig/arrow-bundle.mjs`) is a bundled version of `apache-arrow` for browser use. It is gitignored (not committed) and is built by `./trace-scripts/build-wasm.sh` as part of the normal Docker build. To rebuild it manually: `cd test-rig && npm run build`.
 
 **Use this after JS/TS changes** to verify the built package works in a browser. The server prints all logs, errors, and query results to the terminal so you can act on failures without needing to open browser DevTools.
 
@@ -156,7 +156,7 @@ Options: `--keep-alive` (keep server/browser open), `--port PORT`, `--timeout MS
 
 4. **Init** (`lib/src/webdb.cc`) — Calls `duckdb_web_<ext>_init(db.get())` to register the extension.
 
-5. **Docker build** (`scripts/docker-build.sh`) — Compiles the Rust staticlib twice (no-threads and threads) before the CMake step, using emscripten as the linker. See the `evalexpr_rhai_wasm` block in `scripts/docker-build.sh` for the exact cargo invocation with RUSTFLAGS for both variants.
+5. **Docker build** (`trace-scripts/docker-build.sh`) — Compiles the Rust staticlib twice (no-threads and threads) before the CMake step, using emscripten as the linker. See the `evalexpr_rhai_wasm` block in `trace-scripts/docker-build.sh` for the exact cargo invocation with RUSTFLAGS for both variants.
 
 6. **Test rig** — Browser-based, like `test-rig/`. NOT a native DuckDB CLI test.
 
