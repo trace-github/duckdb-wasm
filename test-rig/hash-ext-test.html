@@ -522,11 +522,43 @@ async function run() {
     );
     check('hash_json_keys_deterministic', extractStr(r), 'true');
 
-    // Correctness: missing key → NULL
+    // Correctness: extra keys in JSON don't affect result (only listed keys matter)
     r = await conn.query(
-      "SELECT (hash_json_keys(['v1','missing'], '{\"v1\":\"x\"}') IS NULL)::VARCHAR AS ok"
+      "SELECT (hash_json_keys(['a'], '{\"a\": 2}'::JSON) = " +
+      "        hash_json_keys(['a'], '{\"a\": 2, \"b\": \"-\"}'::JSON))::VARCHAR AS ok"
     );
-    check('hash_json_keys_missing_null', extractStr(r), 'true');
+    check('hash_json_keys_extra_keys_ignored', extractStr(r), 'true');
+
+    // Correctness: missing key and null value produce same hash (both use placeholder)
+    r = await conn.query(
+      "SELECT (hash_json_keys(['a'], '{}'::JSON) = " +
+      "        hash_json_keys(['a'], '{\"a\": null}'::JSON))::VARCHAR AS ok"
+    );
+    check('hash_json_keys_missing_eq_null', extractStr(r), 'true');
+
+    // Correctness: missing/null keys still return a non-null hash
+    r = await conn.query(
+      "SELECT (hash_json_keys(['a'], '{}'::JSON) IS NOT NULL)::VARCHAR AS ok"
+    );
+    check('hash_json_keys_missing_not_null', extractStr(r), 'true');
+
+    // Correctness: different key paths produce different hashes
+    r = await conn.query(
+      "SELECT (hash_json_keys(['a'], '{}'::JSON) != " +
+      "        hash_json_keys(['a','b'], '{}'::JSON))::VARCHAR AS ok"
+    );
+    check('hash_json_keys_diff_key_paths', extractStr(r), 'true');
+
+    // Correctness: empty key list returns 1
+    r = await conn.query(
+      "SELECT hash_json_keys([], '{}'::JSON)::VARCHAR AS v"
+    );
+    check('hash_json_keys_empty_keys_obj', extractStr(r), '1');
+
+    r = await conn.query(
+      "SELECT hash_json_keys([], '{\"a\": null}'::JSON)::VARCHAR AS v"
+    );
+    check('hash_json_keys_empty_keys_null', extractStr(r), '1');
 
     // Correctness: scalar and table function agree (sum over 1k rows, direct UINTEGER).
     {

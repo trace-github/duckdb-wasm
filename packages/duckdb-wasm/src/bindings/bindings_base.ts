@@ -5,7 +5,7 @@ import { InstantiationProgress } from './progress';
 import { DuckDBBindings } from './bindings_interface';
 import { DuckDBConnection } from './connection';
 import { StatusCode, IsArrowBuffer, IsDuckDBWasmRetry } from '../status';
-import { dropResponseBuffers, DuckDBRuntime, readString, callSRet, copyBuffer, DuckDBDataProtocol } from './runtime';
+import { dropResponseBuffers, DuckDBRuntime, readString, callSRet, copyBuffer, DuckDBDataProtocol, ensureFreshMemoryViews } from './runtime';
 import { CSVInsertOptions, JSONInsertOptions, ArrowInsertOptions } from './insert_options';
 import { ScriptTokens } from './tokens';
 import { FileStatistics } from './file_stats';
@@ -675,6 +675,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
         if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
+        ensureFreshMemoryViews(this.mod);
         const buffer = new Uint8Array(this.mod.HEAPU8.buffer, d, n);
         const copy = new Uint8Array(buffer.length);
         copy.set(buffer);
@@ -701,6 +702,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
         if (isNotSuccess(s)) {
             throw new Error(readString(this.mod, d, n));
         }
+        ensureFreshMemoryViews(this.mod);
         return new FileStatistics(new Uint8Array(this.mod.HEAPU8.buffer, d, n));
     }
 }

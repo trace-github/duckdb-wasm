@@ -21,8 +21,24 @@ export function failWith(mod: DuckDBModule, msg: string): void {
     mod.ccall('duckdb_web_fail_with', null, ['string'], [msg]);
 }
 
+/** In COI mode, another pthread can grow WASM memory at any time. When that
+ *  happens, wasmMemory.buffer changes but Module.HEAPU8/HEAPF64 still point
+ *  to views over the old (smaller) buffer. Emscripten's own GROWABLE_HEAP_*
+ *  wrappers handle this for generated glue code, but our TS bypasses them.
+ *  This mirrors that check: compare wasmMemory.buffer to HEAPU8.buffer and
+ *  refresh the views if they diverge. No-op for EH/MVP (wasmMemory unset). */
+export function ensureFreshMemoryViews(mod: DuckDBModule): void {
+    const wm = mod.wasmMemory;
+    if (wm && wm.buffer !== mod.HEAPU8.buffer) {
+        const b = wm.buffer;
+        mod.HEAPU8 = new Uint8Array(b);
+        mod.HEAPF64 = new Float64Array(b);
+    }
+}
+
 /** Copy a buffer */
 export function copyBuffer(mod: DuckDBModule, begin: number, length: number): Uint8Array {
+    ensureFreshMemoryViews(mod);
     const buffer = new Uint8Array(mod.HEAPU8.buffer, begin, length);
     const copy = new Uint8Array(new ArrayBuffer(buffer.byteLength));
     copy.set(buffer);
@@ -31,6 +47,7 @@ export function copyBuffer(mod: DuckDBModule, begin: number, length: number): Ui
 
 /** Decode a string */
 export function readString(mod: DuckDBModule, begin: number, length: number): string {
+    ensureFreshMemoryViews(mod);
     return decodeText(new Uint8Array(mod.HEAPU8.buffer, begin, length));
 }
 
@@ -116,8 +133,11 @@ export function callSRet(
     argTypes.unshift('number');
     args.unshift(response);
 
-    // Do the call
+    // Do the call — may trigger memory.grow() on this or another thread
     mod.ccall(funcName, null, argTypes, args);
+
+    // Refresh heap views in case memory grew during ccall
+    ensureFreshMemoryViews(mod);
 
     // Read the response
     const status = mod.HEAPF64[(response >> 3) + 0];

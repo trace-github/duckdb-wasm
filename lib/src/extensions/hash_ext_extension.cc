@@ -37,7 +37,7 @@ extern "C" bool fnv1a_hash_json_field(
 
 // Feeds one JSON field into a running FNV-1a hash state (for multi-key hashing).
 // C++ initialises h = FNV_INIT, calls this once per key in the name_list.
-// Returns true and updates *h if key found; false (h unchanged) if not.
+// Missing keys and JSON null values use a placeholder — always returns true.
 extern "C" bool fnv1a_hash_json_field_feed(
     uint64_t        *h,
     const uint8_t   *json, size_t json_len,
@@ -421,7 +421,8 @@ static void HashJsonScalarFunction(DataChunk &args, ExpressionState &state, Vect
 // For each key in name_list, extracts its value from the JSON and feeds both
 // key and value into a running FNV-1a hash. C++ calls Rust once per key via
 // fnv1a_hash_json_field_feed, which reads DuckDB's raw string buffer directly.
-// Returns NULL if any key is missing from the JSON.
+// Missing keys and JSON null values are treated identically (hashed with a
+// placeholder). Empty key list returns 1. Always returns a non-null hash.
 // ---------------------------------------------------------------------------
 
 static void HashJsonKeysScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -457,24 +458,25 @@ static void HashJsonKeysScalarFunction(DataChunk &args, ExpressionState &state, 
         const auto &json   = json_data[ji];
         const auto &lentry = list_entries[li];
 
-        uint64_t h = FNV_INIT_VALUE;
-        bool all_found = true;
+        // Empty key list → return 1
+        if (lentry.length == 0) {
+            out[i] = 1;
+            continue;
+        }
 
-        for (idx_t j = 0; j < lentry.length && all_found; j++) {
+        uint64_t h = FNV_INIT_VALUE;
+
+        for (idx_t j = 0; j < lentry.length; j++) {
             auto ci = child_fmt.sel->get_index(lentry.offset + j);
             const auto &key = child_data[ci];
-            all_found = fnv1a_hash_json_field_feed(
+            fnv1a_hash_json_field_feed(
                 &h,
                 reinterpret_cast<const uint8_t *>(json.GetData()), json.GetSize(),
                 reinterpret_cast<const uint8_t *>(key.GetData()),  key.GetSize()
             );
         }
 
-        if (!all_found) {
-            validity.SetInvalid(i);
-        } else {
-            out[i] = static_cast<uint32_t>(h);
-        }
+        out[i] = static_cast<uint32_t>(h);
     }
 }
 
@@ -549,25 +551,26 @@ static OperatorResultType HashJsonKeysTableInOutFunc(
     auto  out      = FlatVector::GetData<uint32_t>(output.data[0]);
     auto &validity = FlatVector::Validity(output.data[0]);
 
+    bool empty_keys = bind.key_names.empty();
+
     for (idx_t i = 0; i < n; i++) {
+        if (empty_keys) {
+            out[i] = 1;
+            continue;
+        }
+
         const auto &json = json_data[json_fmt.sel->get_index(i)];
         uint64_t h = FNV_INIT_VALUE;
-        bool all_found = true;
 
         for (const auto &key_name : bind.key_names) {
-            all_found = fnv1a_hash_json_field_feed(
+            fnv1a_hash_json_field_feed(
                 &h,
                 reinterpret_cast<const uint8_t *>(json.GetData()), json.GetSize(),
                 reinterpret_cast<const uint8_t *>(key_name.data()), key_name.size()
             );
-            if (!all_found) break;
         }
 
-        if (!all_found) {
-            validity.SetInvalid(i);
-        } else {
-            out[i] = static_cast<uint32_t>(h);
-        }
+        out[i] = static_cast<uint32_t>(h);
     }
     return OperatorResultType::NEED_MORE_INPUT;
 }

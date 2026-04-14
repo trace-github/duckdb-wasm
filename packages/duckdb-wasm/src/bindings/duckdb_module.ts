@@ -12,4 +12,8 @@ export interface DuckDBModule extends EmscriptenModule {
 
     ccall: typeof ccall;
     PThread: PThread;
+
+    /** WebAssembly.Memory object — exposed on Module for COI builds so TS code
+     *  can detect memory growth from other threads (mirrors GROWABLE_HEAP pattern). */
+    wasmMemory?: WebAssembly.Memory;
 }

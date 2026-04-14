@@ -115,6 +115,8 @@ fs.copyFile(path.resolve(src, 'bindings', 'duckdb-coi.wasm'), path.resolve(dist,
     // but the custom pthread worker sets Module["wasmMemory"] before calling DuckDB(m).
     // Without this, the local wasmMemory var stays undefined and WebAssembly.Instance fails.
     patchCoiPthreadMemory('./src/bindings/duckdb-coi.js');
+    // Expose wasmMemory on Module for COI memory growth detection (see runtime.ts).
+    patchExposeWasmMemory('./src/bindings/duckdb-coi.js');
 
     // -------------------------------
     // Browser bundles
@@ -355,6 +357,48 @@ function patchFile(fileName, moduleName) {
     // - we have to escape the middle quote
     const sedCommand = `s/require(["'\\'']${moduleName}["'\\''])/["${moduleName}"].map(require)/g`;
     execSync(`sed -i.bak '${sedCommand}' ${fileName} && rm ${fileName}.bak`);
+}
+
+function patchExposeWasmMemory(fileName) {
+    const content = fs.readFileSync(fileName, 'utf8');
+    const needle = '                updateMemoryViews()\n            }\n\n            function preRun()';
+    if (!content.includes(needle)) {
+        console.warn('WARN: Could not find COI wasmMemory exposure pattern to patch');
+        return;
+    }
+    const patched = content.replace(
+        needle,
+        '                updateMemoryViews()\n            }\n            Module["wasmMemory"] = wasmMemory\n\n            function preRun()'
+    );
+    fs.writeFileSync(fileName, patched);
+}
+
+function patchPthreadLoadMessage(fileName) {
+    const content = fs.readFileSync(fileName, 'utf8');
+    const needle = '                    worker.postMessage({\n                        cmd: "load",\n                        handlers,\n                        wasmMemory,\n                        wasmModule\n                    })';
+    if (!content.includes(needle)) {
+        console.warn('WARN: Could not find pthread load message pattern to patch');
+        return;
+    }
+    const patched = content.replace(
+        needle,
+        '                    worker.postMessage({\n                        cmd: "load",\n                        handlers,\n                        urlOrBlob: Module["_coiMainModuleUrl"] || _scriptName,\n                        wasmMemory,\n                        wasmModule\n                    })'
+    );
+    fs.writeFileSync(fileName, patched);
+}
+
+function patchDisableAutoInit(fileName) {
+    const content = fs.readFileSync(fileName, 'utf8');
+    const needle = '// When running as a pthread, construct a new instance on startup\nisPthread && DuckDB();';
+    if (!content.includes(needle)) {
+        console.warn('WARN: Could not find pthread auto-init pattern to patch');
+        return;
+    }
+    const patched = content.replace(
+        needle,
+        '// Auto-init disabled: the pthread stub calls DuckDB(Module) explicitly.\n// isPthread && DuckDB();'
+    );
+    fs.writeFileSync(fileName, patched);
 }
 
 function patchCoiPthreadMemory(fileName) {

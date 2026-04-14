@@ -9,6 +9,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 
 const FNV_INIT: u64 = 14695981039346656037;
 const FNV_PRIME: u64 = 1099511628211;
+const NULL_PLACEHOLDER: &[u8] = b"$$null_placeholder$$";
 
 fn fnv1a_feed(mut h: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
@@ -219,7 +220,9 @@ pub extern "C" fn fnv1a_hash_json_field(
 // once per key. Each call hashes: key_bytes + 0xFF sep + value_bytes + 0xFE sep.
 // The two different separators prevent collisions between (k1+v1) and (k1v1).
 //
-// Returns true and updates *h if key found; false (h unchanged) if not found.
+// Missing keys and JSON null values are treated identically: both use
+// NULL_PLACEHOLDER as the value bytes. This ensures that {'a': null} and {}
+// produce the same hash for key 'a'. Always returns true.
 // ---------------------------------------------------------------------------
 #[no_mangle]
 pub extern "C" fn fnv1a_hash_json_field_feed(
@@ -230,22 +233,23 @@ pub extern "C" fn fnv1a_hash_json_field_feed(
     let json_bytes = unsafe { core::slice::from_raw_parts(json, json_len) };
     let key_bytes  = unsafe { core::slice::from_raw_parts(key,  key_len)  };
 
-    match json_find_value(json_bytes, key_bytes) {
-        Some(value) => {
-            let mut hh = unsafe { *h };
-            // hash key bytes
-            hh = fnv1a_feed(hh, key_bytes);
-            // separator between key and value
-            hh ^= 0xFF;
-            hh = hh.wrapping_mul(FNV_PRIME);
-            // hash value bytes
-            hh = fnv1a_feed(hh, value);
-            // separator between key-value pairs
-            hh ^= 0xFE;
-            hh = hh.wrapping_mul(FNV_PRIME);
-            unsafe { *h = hh; }
-            true
-        }
-        None => false,
-    }
+    let value = match json_find_value(json_bytes, key_bytes) {
+        Some(v) if v == b"null" => NULL_PLACEHOLDER,
+        Some(v) => v,
+        None => NULL_PLACEHOLDER,
+    };
+
+    let mut hh = unsafe { *h };
+    // hash key bytes
+    hh = fnv1a_feed(hh, key_bytes);
+    // separator between key and value
+    hh ^= 0xFF;
+    hh = hh.wrapping_mul(FNV_PRIME);
+    // hash value bytes
+    hh = fnv1a_feed(hh, value);
+    // separator between key-value pairs
+    hh ^= 0xFE;
+    hh = hh.wrapping_mul(FNV_PRIME);
+    unsafe { *h = hh; }
+    true
 }
