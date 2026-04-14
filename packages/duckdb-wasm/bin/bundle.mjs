@@ -355,7 +355,7 @@ function patchFile(fileName, moduleName) {
     // - the sed expression is executed within single quotes
     // - we have to terminate the quotes
     // - we have to escape the middle quote
-    const sedCommand = `s/require(["'\\'']${moduleName}["'\\''])/["${moduleName}"].map(require)/g`;
+    const sedCommand = `s/require(["'\\'']${moduleName}["'\\''])/["${moduleName}"].map(require)[0]/g`;
     execSync(`sed -i.bak '${sedCommand}' ${fileName} && rm ${fileName}.bak`);
 }
 
