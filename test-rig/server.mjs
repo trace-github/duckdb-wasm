@@ -32,11 +32,9 @@ const server = createServer(async (req, res) => {
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Access-Control-Allow-Origin', '*');
 
-  // Log all requests for debugging
+  // Log all requests except heartbeat pings
   if (req.url !== '/ping.html') {
-    // Don't log heartbeat pings
-  } else {
-    console.log(`[heartbeat] ${new Date().toISOString()}`);
+    console.log(`[${req.method}] ${req.url}`);
   }
 
   if (req.method === 'POST' && req.url === '/report') {
@@ -90,9 +88,16 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' || req.method === 'HEAD') {
-    let filePath;
     const url = new URL(req.url, `http://localhost:${PORT}`);
 
+    // Silence browser favicon requests
+    if (url.pathname === '/favicon.ico') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    let filePath;
     if (url.pathname === '/' || url.pathname === '/index.html') {
       filePath = join(__dirname, 'index.html');
     } else if (url.pathname.startsWith('/dist/')) {
@@ -109,6 +114,7 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': MIME_TYPES[ext] || 'application/octet-stream' });
       res.end(content);
     } catch {
+      console.warn(`[404] ${url.pathname}`);
       res.writeHead(404);
       res.end('Not found');
     }

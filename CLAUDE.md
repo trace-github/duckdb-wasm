@@ -37,7 +37,7 @@ A `duckdb-wasm-cache` Docker volume persists ccache across runs:
 ### Docker Build Details
 
 - **`Dockerfile`** — Debian image with emscripten 4.0.3 (includes binaryen v126), ccache, Node 20
-- **`trace-scripts/docker-build.sh`** — Entrypoint script (copied into the image). Uses `build-docker/` as build prefix to avoid CMake cache conflicts with any host builds
+- **`scripts/docker-build.sh`** — Entrypoint script (copied into the image). Uses `build-docker/` as build prefix to avoid CMake cache conflicts with any host builds
 - **`trace-scripts/build-wasm.sh`** — Host-side wrapper. Builds the image, creates the cache volume, bind-mounts the repo, runs the build
 - The `DUCKDB_WASM_BUILD_PREFIX` env var in `scripts/wasm_build_lib.sh` controls the build output directory (defaults to `${PROJECT_ROOT}/build` for native, set to `/src/build-docker` in Docker)
 
@@ -156,7 +156,7 @@ Options: `--keep-alive` (keep server/browser open), `--port PORT`, `--timeout MS
 
 4. **Init** (`lib/src/webdb.cc`) — Calls `duckdb_web_<ext>_init(db.get())` to register the extension.
 
-5. **Docker build** (`trace-scripts/docker-build.sh`) — Compiles the Rust staticlib twice (no-threads and threads) before the CMake step, using emscripten as the linker. See the `evalexpr_rhai_wasm` block in `trace-scripts/docker-build.sh` for the exact cargo invocation with RUSTFLAGS for both variants.
+5. **Docker build** (`scripts/docker-build.sh`, run from within docker) - Compiles the Rust staticlib twice (no-threads and threads) before the CMake step, using emscripten as the linker. See the `evalexpr_rhai_wasm` block in `scripts/docker-build.sh` for the exact cargo invocation with RUSTFLAGS for both variants.
 
 6. **Test rig** — Browser-based, like `test-rig/`. NOT a native DuckDB CLI test.
 

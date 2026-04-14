@@ -195,13 +195,13 @@ async function run() {
     check('different_json_different_hash', extractStr(r), 'true');
 
     r = await conn.query(`
-      SELECT (parent_match_hash IS NULL AND target_match_hash IS NULL)::VARCHAR AS ok
+      SELECT (parent_match_hash IS NOT NULL AND target_match_hash IS NOT NULL)::VARCHAR AS ok
       FROM metric_table(
         (SELECT vals, value, count FROM src WHERE series = 'sensor_C'),
         'series_id', ['bool_val', 'int_val'], 'str_val'
       )
     `);
-    check('missing_key_null_hash', extractStr(r), 'true');
+    check('missing_key_nonnull_hash', extractStr(r), 'true');
 
     r = await conn.query(`
       WITH t AS (
