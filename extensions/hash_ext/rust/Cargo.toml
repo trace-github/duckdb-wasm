@@ -1,13 +1,12 @@
 [package]
-name = "hash_ext_wasm"
+name = "hash_ext"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [lib]
-name = "hash_ext_wasm"
+name = "hash_ext"
 crate-type = ["staticlib"]
-path = "../extensions/hash_ext/rust/src/lib.rs"
 
 [profile.release]
 panic = "abort"

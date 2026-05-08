@@ -292,7 +292,11 @@ else()
 
   add_library(
     duckdb_web_hash_ext
-    ${CMAKE_SOURCE_DIR}/src/extensions/hash_ext_extension.cc)
+    ${CMAKE_SOURCE_DIR}/src/extensions/hash_ext_extension.cc
+    ${CMAKE_SOURCE_DIR}/../extensions/hash_ext/src/hash_ext_functions.cpp)
+
+  target_include_directories(duckdb_web_hash_ext PRIVATE
+    ${CMAKE_SOURCE_DIR}/../extensions/hash_ext/src/include)
 
   add_library(
     duckdb_web_lua

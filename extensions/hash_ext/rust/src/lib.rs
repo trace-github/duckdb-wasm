@@ -1,7 +1,8 @@
-#![no_std]
-// FNV-1a hash functions for DuckDB WASM extension.
-// no_std avoids duplicating std symbols when multiple Rust staticlibs are linked.
+// FNV-1a hash functions for DuckDB extension.
+// Shared source: compiled for wasm32-unknown-emscripten (WASM build) and native targets.
+#![cfg_attr(target_arch = "wasm32", no_std)]
 
+#[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
@@ -26,9 +27,6 @@ fn hash_two(a: &[u8], b: &[u8]) -> u64 {
     fnv1a_feed(h, b)
 }
 
-// ---------------------------------------------------------------------------
-// Exported: FNV-1a(a || 0xFF || b). Used by row_hash(id, value).
-// ---------------------------------------------------------------------------
 #[no_mangle]
 pub extern "C" fn fnv1a_hash_two(
     a: *const u8, a_len: usize,
@@ -38,14 +36,6 @@ pub extern "C" fn fnv1a_hash_two(
     let b_bytes = unsafe { core::slice::from_raw_parts(b, b_len) };
     hash_two(a_bytes, b_bytes)
 }
-
-// ---------------------------------------------------------------------------
-// Minimal JSON property extractor — no_std, zero-copy, zero-allocation.
-//
-// DuckDB's JSON type is stored as raw UTF-8 bytes (a VARCHAR internally).
-// The pointer DuckDB passes is a direct view into its string buffer —
-// no serialisation, no copies. Rust reads the same memory.
-// ---------------------------------------------------------------------------
 
 fn skip_ws(json: &[u8], mut i: usize) -> usize {
     while i < json.len() && matches!(json[i], b' ' | b'\t' | b'\n' | b'\r') {
@@ -101,10 +91,6 @@ fn skip_value(json: &[u8], mut i: usize) -> Option<usize> {
     }
 }
 
-/// Find the raw bytes of `key`'s value in a flat JSON object.
-/// String values: content between outer quotes.
-/// Scalar values (number/bool/null): raw bytes.
-/// Returns None if key not found.
 fn json_find_value<'a>(json: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     let mut i = 0;
     while i < json.len() && json[i] != b'{' { i += 1; }
@@ -161,13 +147,6 @@ fn json_find_value<'a>(json: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Exported: extract raw value bytes for a key from a JSON object.
-// String values: bytes between the quotes (no quotes in output).
-// Scalar values (number/bool/null): raw bytes.
-// Returns true and sets *out_ptr/*out_len on success (pointer into json buffer).
-// Returns false if key not found.
-// ---------------------------------------------------------------------------
 #[no_mangle]
 pub extern "C" fn json_extract_raw(
     json: *const u8, json_len: usize,
@@ -189,11 +168,6 @@ pub extern "C" fn json_extract_raw(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Exported: hash a single JSON field. Used by hash_json(json, key).
-// Computes FNV-1a(key || 0xFF || extracted_value).
-// Returns true + *out_hash on success; false (NULL result) if key not found.
-// ---------------------------------------------------------------------------
 #[no_mangle]
 pub extern "C" fn fnv1a_hash_json_field(
     json: *const u8, json_len: usize,
@@ -212,18 +186,6 @@ pub extern "C" fn fnv1a_hash_json_field(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Exported: feed one JSON field into a running FNV-1a hash state.
-// Used by hash_json_keys / hash_json_keys_table for multi-key hashing.
-//
-// C++ initialises h = FNV_INIT (14695981039346656037ULL), then calls this
-// once per key. Each call hashes: key_bytes + 0xFF sep + value_bytes + 0xFE sep.
-// The two different separators prevent collisions between (k1+v1) and (k1v1).
-//
-// Missing keys and JSON null values are treated identically: both use
-// NULL_PLACEHOLDER as the value bytes. This ensures that {'a': null} and {}
-// produce the same hash for key 'a'. Always returns true.
-// ---------------------------------------------------------------------------
 #[no_mangle]
 pub extern "C" fn fnv1a_hash_json_field_feed(
     h:    *mut u64,
@@ -240,14 +202,10 @@ pub extern "C" fn fnv1a_hash_json_field_feed(
     };
 
     let mut hh = unsafe { *h };
-    // hash key bytes
     hh = fnv1a_feed(hh, key_bytes);
-    // separator between key and value
     hh ^= 0xFF;
     hh = hh.wrapping_mul(FNV_PRIME);
-    // hash value bytes
     hh = fnv1a_feed(hh, value);
-    // separator between key-value pairs
     hh ^= 0xFE;
     hh = hh.wrapping_mul(FNV_PRIME);
     unsafe { *h = hh; }
