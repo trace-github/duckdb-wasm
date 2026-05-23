@@ -24,8 +24,8 @@ for variant in mvp eh coi; do
     fi
 done
 
-if [ ! -f "$PKG_DIR/dist/duckdb-wasm.mjs" ]; then
-    echo "ERROR: dist/duckdb-wasm.mjs not found. Run ./build-wasm.sh first." >&2
+if [ ! -f "$PKG_DIR/dist/duckdb-browser.mjs" ]; then
+    echo "ERROR: dist/duckdb-browser.mjs not found. Run ./build-wasm.sh first." >&2
     exit 1
 fi
 
