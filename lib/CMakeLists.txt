@@ -176,6 +176,9 @@ set(CMAKE_BUILD_PARALLEL_LEVEL ${NPROCS})
 set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake/modules ${CMAKE_MODULE_PATH})
 
 include("${CMAKE_SOURCE_DIR}/cmake/duckdb.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/hash_ext.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/lua.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/fts.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/arrow.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/benchmark.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/gflags.cmake")
@@ -260,18 +263,54 @@ else()
     duckdb_web_json
     ${CMAKE_SOURCE_DIR}/src/extensions/json_extension.cc)
 
-  set(EXTENSION_CACHE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../.ccache/extension")
-  set(JSON_EXTENSION_CACHE_FILE "${EXTENSION_CACHE_DIR}/json")
+  add_library(
+    duckdb_web_icu
+    ${CMAKE_SOURCE_DIR}/src/extensions/icu_extension.cc)
 
-  set(DUCKDB_WEB_JSON "")
-  if(EXISTS "${JSON_EXTENSION_CACHE_FILE}")
-    set(DUCKDB_WEB_JSON "duckdb_web_json")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DDUCKDB_JSON_EXTENSION")
-  endif()
+  add_library(
+    duckdb_web_tpcds
+    ${CMAKE_SOURCE_DIR}/src/extensions/tpcds_extension.cc)
 
-  target_link_libraries(duckdb_web duckdb duckdb_web_parquet ${DUCKDB_WEB_JSON} arrow rapidjson ${THREAD_LIBS})
+  add_library(
+    duckdb_web_tpch
+    ${CMAKE_SOURCE_DIR}/src/extensions/tpch_extension.cc)
+
+  add_library(
+    duckdb_web_hash_ext
+    ${CMAKE_SOURCE_DIR}/src/extensions/hash_ext_extension.cc
+    ${CMAKE_SOURCE_DIR}/../extensions/hash_ext/src/hash_ext_functions.cpp)
+  target_include_directories(duckdb_web_hash_ext PRIVATE
+    ${CMAKE_SOURCE_DIR}/../extensions/hash_ext/src/include
+    ${DUCKDB_INCLUDE_DIR})
+  target_link_libraries(duckdb_web_hash_ext duckdb hash_ext_rust)
+
+  add_library(
+    duckdb_web_lua
+    ${CMAKE_SOURCE_DIR}/src/extensions/lua_extension.cc
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb_lua/src/lua_extension.cpp)
+  target_include_directories(duckdb_web_lua PRIVATE
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb_lua/src/include
+    ${CMAKE_SOURCE_DIR}/../submodules/lua)
+
+  add_library(
+    duckdb_web_fts
+    ${CMAKE_SOURCE_DIR}/src/extensions/fts_extension.cc
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb_fts/extension/fts/fts_extension.cpp
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb_fts/extension/fts/fts_indexing.cpp)
+  target_include_directories(duckdb_web_fts PRIVATE
+    ${CMAKE_SOURCE_DIR}/../submodules/duckdb_fts/extension/fts/include)
+
+  # Always link JSON extension (upstream conditionally checks a cache file)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DDUCKDB_JSON_EXTENSION")
+
+  target_link_libraries(duckdb_web duckdb duckdb_web_parquet duckdb_web_json duckdb_web_icu duckdb_web_tpcds duckdb_web_tpch duckdb_web_hash_ext duckdb_web_lua duckdb_web_fts arrow rapidjson ${THREAD_LIBS})
   target_link_libraries(duckdb_web_parquet duckdb duckdb_parquet)
   target_link_libraries(duckdb_web_json duckdb duckdb_json)
+  target_link_libraries(duckdb_web_icu duckdb duckdb_icu)
+  target_link_libraries(duckdb_web_tpcds duckdb duckdb_tpcds)
+  target_link_libraries(duckdb_web_tpch duckdb duckdb_tpch)
+  target_link_libraries(duckdb_web_lua duckdb lua_c_lib)
+  target_link_libraries(duckdb_web_fts duckdb snowball_stemmer)
 endif()
 
 # ---------------------------------------------------------------------------

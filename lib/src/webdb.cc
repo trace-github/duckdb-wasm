@@ -54,6 +54,12 @@
 #include "duckdb/web/environment.h"
 #include "duckdb/web/extensions/json_extension.h"
 #include "duckdb/web/extensions/parquet_extension.h"
+#include "duckdb/web/extensions/icu_extension.h"
+#include "duckdb/web/extensions/tpcds_extension.h"
+#include "duckdb/web/extensions/tpch_extension.h"
+#include "duckdb/web/extensions/hash_ext_extension.h"
+#include "duckdb/web/extensions/lua_extension.h"
+#include "duckdb/web/extensions/fts_extension.h"
 #include "duckdb/web/functions/table_function_relation.h"
 #include "duckdb/web/http_wasm.h"
 #include "duckdb/web/io/arrow_ifstream.h"
@@ -984,6 +990,12 @@ arrow::Status WebDB::Open(std::string_view args_json) {
 #if defined(DUCKDB_JSON_EXTENSION)
         duckdb_web_json_init(db.get());
 #endif
+        duckdb_web_icu_init(db.get());
+        duckdb_web_tpcds_init(db.get());
+        duckdb_web_tpch_init(db.get());
+        duckdb_web_hash_ext_init(db.get());
+        duckdb_web_lua_init(db.get());
+        duckdb_web_fts_init(db.get());
 #endif  // WASM_LOADABLE_EXTENSIONS
         RegisterCustomExtensionOptions(db);
 

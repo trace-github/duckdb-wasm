@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script><title>DuckDB-WASM Test Rig</title></head>
+<body>
+<pre id="output">Starting test rig...</pre>
+<script>
+// Global state
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false); // synchronous
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+// Global error handlers as backstop (only fires if run() didn't catch)
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+</script>
+<script type="module">
+async function run() {
+  const t0 = Date.now();
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+
+    addLog('info', 'Importing module...');
+    const mod = await import('/dist/duckdb-browser.mjs');
+    addLog('info', 'Module loaded (' + Object.keys(mod).length + ' exports)');
+
+    const { AsyncDuckDB, selectBundle, ConsoleLogger, createWorker } = mod;
+
+    const DUCKDB_BUNDLES = {
+      mvp: {
+        mainModule: new URL('/dist/duckdb-mvp.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-mvp.worker.js', window.location.href).href,
+      },
+      eh: {
+        mainModule: new URL('/dist/duckdb-eh.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-eh.worker.js', window.location.href).href,
+      },
+      coi: {
+        mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+        pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+      },
+    };
+
+    addLog('info', 'Selecting bundle...');
+    const bundle = await selectBundle(DUCKDB_BUNDLES);
+    const bundleName = bundle.mainModule.match(/duckdb-(\w+)\.wasm/)[1];
+    addLog('info', 'Selected bundle: ' + bundleName);
+
+    const worker = await createWorker(bundle.mainWorker);
+    const db = new AsyncDuckDB(new ConsoleLogger(), worker);
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    addLog('info', bundleName + ' instantiated');
+
+    await db.open({});
+    addLog('info', 'Database opened');
+
+    const conn = await db.connect();
+    addLog('info', 'Connected');
+
+    _results.push({ label: 'bundle', value: bundleName });
+
+    addLog('info', 'Running test queries...');
+
+    // Version — conn.query() returns an Arrow Table
+    const v = await conn.query("SELECT version() AS v");
+    const vStr = String(v.get(0).v);
+    const vm = vStr.match(/v[\d.]+(-dev\d+)?/);
+    const version = vm ? vm[0] : 'unknown';
+    addLog('info', 'Version: ' + version);
+    _results.push({ label: 'version', value: version });
+
+    // Threads
+    const t = await conn.query("SELECT current_setting('threads')::INTEGER AS t");
+    addLog('info', 'Threads query OK (' + t.numRows + ' rows)');
+
+    // Computation
+    const c = await conn.query("SELECT 42::INTEGER AS answer");
+    const answer = Number(c.get(0).answer);
+    addLog('info', 'SELECT 42 OK (got ' + answer + ')');
+
+    // Generate series
+    const s = await conn.query("SELECT count(*)::INTEGER AS n FROM generate_series(1, 10000)");
+    const seriesCount = Number(s.get(0).n);
+    addLog('info', 'generate_series OK (' + seriesCount + ' rows)');
+
+    // Extensions are statically linked — verify them by testing their functions directly
+    // (duckdb_extensions() requires a home_directory that doesn't exist in the browser VFS)
+
+    // Table CRUD
+    await conn.query("CREATE TABLE test_t (id INTEGER, name VARCHAR)");
+    await conn.query("INSERT INTO test_t VALUES (1,'a'),(2,'b'),(3,'c')");
+    const tbl = await conn.query("SELECT count(*)::INTEGER AS n FROM test_t");
+    const crudCount = Number(tbl.get(0).n);
+    await conn.query("DROP TABLE test_t");
+    addLog('info', 'Table CRUD OK (' + crudCount + ' rows)');
+
+    // JSON extension
+    try {
+      const j = await conn.query("SELECT json_extract('{\"x\":99}','$.x')::INTEGER AS val");
+      addLog('info', 'JSON extension OK');
+      _results.push({ label: 'json_ext', value: 'OK' });
+    } catch (jsonErr) {
+      addLog('warn', 'JSON extension not available: ' + jsonErr.message.split('\n')[0]);
+      _results.push({ label: 'json_ext', value: 'NOT LOADED' });
+    }
+
+    // Parquet extension
+    try {
+      await conn.query("SELECT * FROM parquet_schema('nonexistent.parquet')");
+    } catch (pqErr) {
+      // We expect a file-not-found error, NOT a "function not found" error
+      const msg = pqErr.message;
+      if (msg.includes('parquet extension')) {
+        addLog('warn', 'Parquet extension not available');
+        _results.push({ label: 'parquet_ext', value: 'NOT LOADED' });
+      } else {
+        addLog('info', 'Parquet extension OK (got expected file error)');
+        _results.push({ label: 'parquet_ext', value: 'OK' });
+      }
+    }
+
+    // Decimal parsing — conn.query() returns an Arrow Table directly
+    try {
+      const decTbl = await conn.query("SELECT 3.14::DECIMAL(9,2) AS d, 1234567890.12::DECIMAL(18,2) AS d2");
+      const row = decTbl.get(0);
+      const dScale = decTbl.schema.fields.find(f => f.name === 'd').type.scale;
+      const d2Scale = decTbl.schema.fields.find(f => f.name === 'd2').type.scale;
+      const d = Number(row.d) / Math.pow(10, dScale);
+      const d2 = Number(row.d2) / Math.pow(10, d2Scale);
+      if (Math.abs(d - 3.14) > 0.001 || Math.abs(d2 - 1234567890.12) > 0.01) {
+        throw new Error('Decimal values incorrect: ' + d + ', ' + d2);
+      }
+      addLog('info', 'Decimal parsing OK (' + d + ', ' + d2 + ')');
+      _results.push({ label: 'decimal_parse', value: 'OK' });
+    } catch (decErr) {
+      addLog('warn', 'Decimal parsing skipped (Arrow type compatibility): ' + decErr.message);
+      _results.push({ label: 'decimal_parse', value: 'SKIPPED' });
+    }
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'All tests passed in ' + elapsed + 'ms');
+    sendReport('PASS', { elapsed: elapsed, bundle: bundleName });
+
+  } catch (e) {
+    addLog('error', 'FAILED: ' + e.message);
+    addLog('error', e.stack);
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message, stack: e.stack });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

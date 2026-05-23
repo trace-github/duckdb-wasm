@@ -1,6 +1,14 @@
 [workspace]
+resolver = "2"
 
 members = [
     "tools/dataprep",
     "packages/duckdb-wasm-shell/crate",
+    "extensions/hash_ext/rust",
+    "hash_ext_wasm",
 ]
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "s"

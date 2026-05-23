@@ -1,11 +1,11 @@
 {
-    "name": "@duckdb/duckdb-wasm",
-    "version": "1.11.0",
-    "description": "DuckDB powered by WebAssembly",
+    "name": "@run-trace/duckdb-wasm",
+    "version": "0.3.0",
+    "description": "DuckDB powered by WebAssembly — Trace fork with bundled extensions",
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "https://github.com/duckdb/duckdb-wasm.git"
+        "url": "https://github.com/trace-github/duckdb-wasm.git"
     },
     "keywords": [
         "sql",

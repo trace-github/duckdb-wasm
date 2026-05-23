@@ -1,112 +1,162 @@
-<div align="center">
-  <picture>
-         <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/duckdb/duckdb-wasm/main/misc/duckdb-wasm.png">
-         <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/duckdb/duckdb-wasm/main/misc/duckdb-wasm.png">
-         <img alt="The DuckDB WASM logo." src="https://raw.githubusercontent.com/duckdb/duckdb-wasm/main/misc/duckdb-wasm.png" height="100" width="150">
-      </picture>
-  <h1>DuckDB-Wasm</h1>
-</div>
+# @run-trace/duckdb-wasm
 
-<div align="center">
-  <a href="https://www.npmjs.com/package/@duckdb/duckdb-wasm/v/latest">
-    <img src="https://img.shields.io/npm/v/@duckdb/duckdb-wasm?logo=npm" alt="duckdb-wasm package on NPM">
-  </a>
-  <a href="https://github.com/duckdb/duckdb-wasm/actions">
-    <img src="https://github.com/duckdb/duckdb-wasm/actions/workflows/main.yml/badge.svg?branch=main" alt="Github Actions Badge">
-  </a>
-  <a href="https://discord.duckdb.org">
-    <img src="https://shields.io/discord/909674491309850675" alt="Join Discord" />
-  </a>
-  <a href="https://github.com/duckdb/duckdb/releases/">
-    <img src="https://img.shields.io/github/v/release/duckdb/duckdb?color=brightgreen&display_name=tag&logo=duckdb&logoColor=white" alt="Latest DuckDB Release">
-  </a>
-  <a href="https://www.jsdelivr.com/package/npm/@duckdb/duckdb-wasm">
-    <img src="https://data.jsdelivr.com/v1/package/npm/@duckdb/duckdb-wasm/badge?style=rounded" alt="jsdeliver stats">
-  </a>
-</div>
-<h1></h1>
+Fork of [duckdb/duckdb-wasm](https://github.com/duckdb/duckdb-wasm) with statically linked extensions and a Node.js worker thread fix.
 
-[DuckDB](https://duckdb.org) is an in-process SQL OLAP Database Management System.
+For general DuckDB-Wasm documentation, see the [upstream README](https://github.com/duckdb/duckdb-wasm).
 
-DuckDB-Wasm brings DuckDB to every browser thanks to WebAssembly.
+## What we changed
 
-Duckdb-Wasm speaks Arrow fluently, reads Parquet, CSV and JSON files backed by Filesystem APIs or HTTP requests and has been tested with Chrome, Firefox, Safari and Node.js. Learn more about DuckDB-Wasm from our [VLDB publication](https://www.vldb.org/pvldb/vol15/p3574-kohn.pdf) or the [recorded talk](https://www.youtube.com/watch?v=wm82b7PlM6s).
+### Bundled extensions
 
-Try it out at [shell.duckdb.org](https://shell.duckdb.org) or at [duckdb.org/visualizer](https://duckdb.org/visualizer).
-[External third party embedding of DuckDB-Wasm](https://github.com/davidgasquez/awesome-duckdb?tab=readme-ov-file#web-clients), read the [API documentation](https://shell.duckdb.org/docs/modules/index.html), check out the [web-app examples](https://github.com/duckdb-wasm-examples), and chat with us on [Discord](https://discord.duckdb.org).
+Extensions are statically linked — no runtime installation or network fetch needed:
 
-## DuckDB and DuckDB-Wasm
+| Extension | Type |
+|-----------|------|
+| json | DuckDB built-in |
+| parquet | DuckDB built-in |
+| icu | DuckDB built-in |
+| tpcds | DuckDB built-in |
+| tpch | DuckDB built-in |
+| fts | External ([duckdb-fts](https://github.com/duckdb/duckdb-fts)) |
+| lua | External ([duckdb-lua](https://github.com/isaacbrodsky/duckdb-lua)) |
+| hash_ext | Custom Rust — `row_hash(col, ...)` stable 64-bit hashing |
 
-DuckDB-Wasm is currently based on DuckDB v1.5.2.
+### Package rename
 
-Relevant differences:
-* Default HTTP stack is different between native and Wasm versions of DuckDB
-* `LOAD httpfs` will opt-in to using the same HTTP logic, but re-implemented in JavaScript
-* Notable differences in network interactions:
-    * Requests are always upgraded to HTTPS
-    * Requests needs server to allow Cross Origin access on a given resource
-* Extension install is lazy, meaning that `INSTALL extension_name FROM 'https://repository.endpoint.org';` defer fetching the extension to the first `LOAD extension_name;` instruction. `INSTALL x FROM community;` shorthands are also supported.
-* DuckDB-Wasm builds are optimized for download speed. Core extensions like autocomplete, JSON, Parquet and ICU are usually bundled DuckDB binaries, while in duckdb-wasm they are autoloaded (including fetching them) at runtime. In particular for ICU autoloading do not work corrently in all cases, explicit `LOAD icu;` might be needed to reproduce same behaviour.
-* DuckDB-Wasm is sandboxed and migth not have the same level of support for out-of-core operations and access to file system
-* DuckDB-Wasm default mode is single threaded. Multithreading is at the moment still experimental.
+Published as `@run-trace/duckdb-wasm` instead of `@duckdb/duckdb-wasm`. Zero TypeScript/JavaScript source changes.
 
-Supported DuckDB features:
-* DuckDB databases files are compatible to be read from DuckDB-Wasm.
-* Databases files can be made available as simple as: `ATTACH 'https://blobs.duckdb.org/data/test.db'; FROM db.t;` [demo](https://shell.duckdb.org/#queries=v0,ATTACH-'https%3A%2F%2Fblobs.duckdb.org%2Fdata%2Ftest.db'-as-db~,FROM-db.t~)
-* Spatial support via `LOAD spatial` [spatial demo](https://shell.duckdb.org/#queries=v0,%20%20-Spatial-extension-for-geospatial-support%0AINSTALL-spatial~%0ALOAD-spatial~,CREATE-TABLE-stations-AS%0A----FROM-'s3%3A%2F%2Fduckdb%20blobs%2Fstations.parquet'~,%20%20-What-are-the-top%203-closest-Intercity-stations%0A%20%20-using-aerial-distance%3F%0ASELECT%0A----s1.name_long-AS-station1%2C%0A----s2.name_long-AS-station2%2C%0A----ST_Distance(%0A--------ST_Point(s1.geo_lng%2C-s1.geo_lat)%2C%0A--------ST_Point(s2.geo_lng%2C-s2.geo_lat)%0A----)-*-111139-AS-distance%0AFROM-stations-s1%2C-stations-s2%0AWHERE-s1.type-LIKE-'%25Intercity%25'%0A--AND-s2.type-LIKE-'%25Intercity%25'%0A--AND-s1.id-%3C-s2.id%0AORDER-BY-distance-ASC%0ALIMIT-3~)
-* A growing subset of extensions, either core, community or external, are supported for DuckDB-Wasm
-* Multithreading work but it's still experimental and by default not enabled
+### Node.js worker thread fix
 
-## DuckDB-Wasm and DuckDB Extension
+The upstream bundle includes a web-worker polyfill that mutates `global.postMessage` when imported from a `worker_threads` worker with custom `workerData`. We apply a post-build patch to `dist/duckdb-node.cjs` that:
 
-DuckDB is extensible and this allows to delegate functionality to [extensions](https://duckdb.org/docs/extensions/overview).
+1. Guards `He()` so it only runs when `workerData.mod` is a string (i.e., only for DuckDB's own internal workers, not application workers)
+2. Exports `NodeWorker` — the bundled Worker class — so you can use identical code in any Node.js context without the `web-worker` npm package
 
-Core extensions are available at https://extensions.duckdb.org, and community extensions are available at https://community-extensions.duckdb.org.
-```sql
---- Excplicitly load extensions
-LOAD icu;
+The patch is applied automatically by `build-wasm.sh` via `trace-scripts/patch-node-bundle.mjs`. The `dist/` directory is not tracked in git.
 
---- Or have them autoloaded when using relevant functions or settings
-DESCRIBE FROM read_parquet('https://blobs.duckdb.org/stations.parquet');  -- (this autoloads JSON)
+## Installation
 
---- Or register extensions
-INSTALL h3 FROM community;
-INSTALL sqlite_scanner FROM 'https://extensions.duckdb.org';
-INSTALL quack FROM 'https://community-extensions.duckdb.org';
-
---- And then load them
-LOAD h3;
-LOAD sqlite_scanner;
-LOAD quack;
+```bash
+npm install @run-trace/duckdb-wasm
 ```
 
-```sql
-FROM duckdb_extensions() WHERE loaded;
+No additional dependencies needed for Node.js — the `web-worker` polyfill is bundled.
+
+## Usage
+
+### Browser
+
+Copy the WASM and worker files from `node_modules/@run-trace/duckdb-wasm/dist/` to your static assets directory, then:
+
+```js
+import * as duckdb from '@run-trace/duckdb-wasm';
+
+const BUNDLES = {
+  mvp: { mainModule: '/assets/duckdb-mvp.wasm',  mainWorker: '/assets/duckdb-browser-mvp.worker.js' },
+  eh:  { mainModule: '/assets/duckdb-eh.wasm',   mainWorker: '/assets/duckdb-browser-eh.worker.js' },
+};
+
+const bundle = await duckdb.selectBundle(BUNDLES);
+const worker = await duckdb.createWorker(bundle.mainWorker);
+const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
+await db.instantiate(bundle.mainModule);
+await db.open({});
+
+const conn = await db.connect();
+const result = await conn.query("SELECT row_hash('user1', 'hello') AS h");
 ```
-Will show that h3, icu, parquet, quack and sqlite_scanner have been loaded.
 
-You can try the [Shell demo with loading of extensions](https://shell.duckdb.org/#queries=v0,%20%20%20-Explicitly-load-extensions%0ALOAD-icu~%0A%0A%20%20%20-Or-have-them-autoloaded-when-using-relevant-functions-or-settings%0ADESCRIBE-FROM-read_parquet('https%3A%2F%2Fblobs.duckdb.org%2Fstations.parquet')~--%20%20-(this-autoloads-parquet)%0A%0A%20%20%20-Or-register-extensions%0AINSTALL-h3-FROM-community~%0AINSTALL-sqlite_scanner-FROM-'https%3A%2F%2Fextensions.duckdb.org'~%0AINSTALL-quack-FROM-'https%3A%2F%2Fcommunity%20extensions.duckdb.org'~%0A%0A%20%20%20-And-then-load-them%3A%0ALOAD-h3~%0ALOAD-sqlite_scanner~%0ALOAD-quack~,FROM-duckdb_extensions()-WHERE-loaded~) but this do require about 3.2 MB of compressed Wasm files to be transfered over the network (on first visit, caching might help).
+### Node.js (main thread)
 
-Extension sizes will vary depending, among other things, on provided functionality or toolchain used.
+```js
+import * as duckdb from '@run-trace/duckdb-wasm';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 
+// Resolve the dist/ directory inside the installed package
+const require = createRequire(import.meta.url);
+const DIST = dirname(require.resolve('@run-trace/duckdb-wasm/dist/duckdb-node.cjs'));
 
-## Build from source
+const BUNDLES = {
+  mvp: { mainModule: join(DIST, 'duckdb-mvp.wasm'),  mainWorker: join(DIST, 'duckdb-node-mvp.worker.cjs') },
+  eh:  { mainModule: join(DIST, 'duckdb-eh.wasm'),   mainWorker: join(DIST, 'duckdb-node-eh.worker.cjs') },
+};
 
-```shell
-git clone https://github.com/duckdb/duckdb-wasm.git
-cd duckdb-wasm
-git submodule init
-git submodule update
-make apply_patches
-make serve
+const bundle = await duckdb.selectBundle(BUNDLES);
+const worker = new duckdb.NodeWorker(bundle.mainWorker);  // no web-worker package needed
+const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
+await db.instantiate(bundle.mainModule);
+await db.open({});
+
+const conn = await db.connect();
+const result = await conn.query("SELECT version() AS v");
+console.log(result.get(0).v);  // v1.5.2
+
+await conn.close();
+await db.terminate();
+worker.terminate();
 ```
 
-## Repository Structure
+### Node.js (worker thread)
 
-| Subproject                                               | Description    | Language   |
-| -------------------------------------------------------- | :------------- | :--------- |
-| [duckdb_wasm](/lib)                                      | Wasm Library   | C++        |
-| [@duckdb/duckdb-wasm](/packages/duckdb-wasm)             | Typescript API | Typescript |
-| [@duckdb/duckdb-wasm-shell](/packages/duckdb-wasm-shell) | SQL Shell      | Rust       |
-| [@duckdb/duckdb-wasm-app](/packages/duckdb-wasm-app)     | GitHub Page    | Typescript |
-| [@duckdb/react-duckdb](/packages/react-duckdb)           | React Hooks    | Typescript |
+`NodeWorker` works identically inside a `worker_threads` worker — no adapter, no `web-worker` package, no global mutation:
+
+```js
+// app-worker.mjs — spawned with: new Worker('./app-worker.mjs', { workerData: { sessionId: '...' } })
+import * as duckdb from '@run-trace/duckdb-wasm';
+import { workerData, parentPort } from 'node:worker_threads';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+
+const require = createRequire(import.meta.url);
+const DIST = dirname(require.resolve('@run-trace/duckdb-wasm/dist/duckdb-node.cjs'));
+
+const BUNDLES = {
+  mvp: { mainModule: join(DIST, 'duckdb-mvp.wasm'),  mainWorker: join(DIST, 'duckdb-node-mvp.worker.cjs') },
+  eh:  { mainModule: join(DIST, 'duckdb-eh.wasm'),   mainWorker: join(DIST, 'duckdb-node-eh.worker.cjs') },
+};
+
+const bundle = await duckdb.selectBundle(BUNDLES);
+const worker = new duckdb.NodeWorker(bundle.mainWorker);  // same API as main thread
+const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
+await db.instantiate(bundle.mainModule);
+await db.open({});
+
+const conn = await db.connect();
+const result = await conn.query("SELECT row_hash('user1', 'hello') AS h");
+parentPort.postMessage({ hash: String(result.get(0).h) });
+
+// Your workerData is untouched — DuckDB's polyfill doesn't run in this context
+console.log(workerData.sessionId);
+
+await conn.close();
+await db.terminate();
+worker.terminate();
+```
+
+## Building
+
+Requires Docker (for WASM) and Rust (for native extensions).
+
+```bash
+./trace-scripts/build-wasm.sh          # WASM build (Docker) — patches duckdb-node.cjs automatically
+./extensions/hash_ext/build-all.sh     # Native hash_ext for all 4 platforms
+./trace-scripts/run-tests.sh           # All tests
+./trace-scripts/clean.sh --all         # Full clean
+```
+
+## Testing
+
+All suites must pass before publishing:
+
+- **Browser smoke** — DuckDB loads, version matches, JSON/Parquet work
+- **Browser hash-ext** — All hash function tests pass
+- **Browser lua** — All lua tests pass
+- **Node.js WASM smoke** — DuckDB loads via `NodeWorker`, queries and bundled extensions work
+- **Node.js WASM worker thread** — DuckDB works inside an application `worker_threads` worker; `global.postMessage` not mutated; `NodeWorker` exported and functional
+- **Node.js native extension** — `hash_ext` loads via `@duckdb/node-api`, known hash values match
+
+## Skills (for Claude Code)
+
+- **Upgrading DuckDB version**: `.claude/skills/upgrade-duckdb-wasm/`
+- **Committing and publishing**: `.claude/skills/commit-and-publish-duckdb-wasm/`

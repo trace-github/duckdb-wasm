@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<body>
+<pre id="out">Ping test...</pre>
+<script>
+const out = document.getElementById('out');
+out.textContent += '\nCOI: ' + crossOriginIsolated;
+fetch('/report', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ status: 'PING', crossOriginIsolated, logs: [{ level: 'info', message: 'ping ok' }], results: [] })
+}).then(() => out.textContent += '\nReport sent!').catch(e => out.textContent += '\nFailed: ' + e);
+</script>
+</body>
+</html>
