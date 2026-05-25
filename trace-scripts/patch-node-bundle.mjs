@@ -1,22 +1,15 @@
 #!/usr/bin/env node
 // Patches dist/duckdb-node.cjs after the WASM build.
 //
-// Applies two fixes to the bundled web-worker polyfill:
+// Applies fixes to the bundled web-worker polyfill so that:
+//   - Importing @run-trace/duckdb-wasm from an application worker thread
+//     doesn't trigger the DuckDB worker bootstrap or mutate globals.
+//   - NodeWorker is exported for use without the 'web-worker' npm package.
 //
-// Patch 1 — Guard He() (the worker-side bootstrap) so it only runs when
-//   workerData.mod is a string. Without this, importing @run-trace/duckdb-wasm
-//   from an application worker thread (which has its own workerData) causes He()
-//   to run, silently failing to load the DuckDB worker and mutating the global
-//   object as a side effect (global.postMessage, prototype chain).
+// All patches use regex patterns that match the code structure rather than
+// exact minified variable names, so they survive esbuild minification changes.
 //
-// Patch 2 — Export NodeWorker: the bundled Qe() Web Worker-compatible class.
-//   With Patch 1 in place, Qe() is correctly returned in both main-thread and
-//   worker-thread contexts, so a single NodeWorker export works everywhere in
-//   Node.js without needing the 'web-worker' npm package.
-//
-// Both patches are idempotent: re-running is safe. The script exits non-zero if
-// an anchor string is missing (meaning the bundle changed and the patch needs
-// updating).
+// All patches are idempotent: re-running is safe.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -37,81 +30,114 @@ try {
 let changed = false;
 
 // ---------------------------------------------------------------------------
-// Patch 1: Guard He() — only run worker bootstrap when workerData.mod is set
+// Patch 1: Guard the worker bootstrap function
+//
+// esbuild produces: <mod>.exports=<R>.isMainThread?<Qe>():<He>()
+// We change it to only call the bootstrap (<He>) when workerData.mod is a
+// string (meaning DuckDB spawned this worker), otherwise return the main-
+// thread class (<Qe>) so the import is safe from application workers.
+//
+// Regex matches: <var>.exports=<var>.isMainThread?<fn>():<fn>()
 // ---------------------------------------------------------------------------
-const P1_BEFORE = 'le.exports=R.isMainThread?Qe():He()';
-const P1_AFTER  = 'le.exports=R.isMainThread?Qe():(R.workerData&&typeof R.workerData.mod==="string"?He():Qe())';
-
-if (src.includes(P1_AFTER)) {
+const P1_GUARD = '.workerData&&typeof';
+if (src.includes(P1_GUARD)) {
   console.log('Patch 1 already applied.');
-} else if (src.includes(P1_BEFORE)) {
-  src = src.replace(P1_BEFORE, P1_AFTER);
-  console.log('Patch 1 applied: He() guard for non-DuckDB worker contexts.');
-  changed = true;
 } else {
-  console.error('ERROR: Patch 1 anchor not found in bundle. Bundle may have changed.');
-  console.error(`Expected: ${P1_BEFORE}`);
-  process.exit(1);
+  // Match: <x>.exports=<R>.isMainThread?<Qe>():<He>()
+  const p1re = /(\w+\.exports\s*=\s*(\w+)\.isMainThread\s*\?\s*(\w+)\(\)\s*:\s*)(\w+)\(\)/;
+  const m1 = src.match(p1re);
+  if (m1) {
+    const [full, prefix, threadsMod, mainFn, workerFn] = m1;
+    const replacement = `${prefix}(${threadsMod}.workerData&&typeof ${threadsMod}.workerData.mod==="string"?${workerFn}():${mainFn}())`;
+    src = src.replace(full, replacement);
+    console.log(`Patch 1 applied: guarded ${workerFn}() with workerData.mod check.`);
+    changed = true;
+  } else {
+    console.error('ERROR: Patch 1 — could not find isMainThread ternary pattern.');
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Patch 2: Export NodeWorker — the bundled Web Worker-compatible class
+// Patch 2: Export NodeWorker in the CJS exports object
+//
+// esbuild produces: createWorker:()=><Ye>,
+// We add:           NodeWorker:()=><ue>.default,
+//
+// We need to find the web-worker polyfill variable name. It's the result of
+// calling the lazy require wrapper: var <ue> = <wrapper>(<lazyRequire>())
+// right before an async function definition.
 // ---------------------------------------------------------------------------
-const P2_BEFORE = 'createWorker:()=>Ye,';
-const P2_AFTER  = 'createWorker:()=>Ye,NodeWorker:()=>ue.default,';
-
-if (src.includes(P2_AFTER)) {
+const P2_GUARD = 'NodeWorker:()=>';
+if (src.includes(P2_GUARD)) {
   console.log('Patch 2 already applied.');
-} else if (src.includes(P2_BEFORE)) {
-  src = src.replace(P2_BEFORE, P2_AFTER);
-  console.log('Patch 2 applied: NodeWorker export added.');
-  changed = true;
 } else {
-  console.error('ERROR: Patch 2 anchor not found in bundle. Bundle may have changed.');
-  console.error(`Expected: ${P2_BEFORE}`);
-  process.exit(1);
+  // Find the web-worker polyfill variable: var <X> = <fn>(<fn>());
+  // This is the only var=fn(fn()) followed by async function in the bundle.
+  const webWorkerVarRe = /var (\w+)=\w+\(\w+\(\)\);(?:var NodeWorker=\w+\.default;)?async function/;
+  const mWW = src.match(webWorkerVarRe);
+  if (!mWW) {
+    console.error('ERROR: Patch 2 — could not find web-worker polyfill variable.');
+    process.exit(1);
+  }
+  const polyfillVar = mWW[1]; // e.g. "ue"
+
+  const createWorkerRe = /createWorker:\(\)=>\w+,/;
+  const mCW = src.match(createWorkerRe);
+  if (mCW) {
+    src = src.replace(mCW[0], `${mCW[0]}NodeWorker:()=>${polyfillVar}.default,`);
+    console.log(`Patch 2 applied: NodeWorker export added (polyfill var: ${polyfillVar}).`);
+    changed = true;
+  } else {
+    console.error('ERROR: Patch 2 — could not find createWorker export.');
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Patch 3: Declare NodeWorker as a named variable for ESM export detection.
-//   Node.js uses cjs-module-lexer to detect CJS named exports for dynamic
-//   import(). The lexer requires shorthand variable syntax {Foo,Bar} in the
-//   dead-code hint — it does not handle property-value expressions like
-//   {NodeWorker:ue.default}. Declaring a real var gives us the shorthand.
+// Patch 3: Declare a real NodeWorker variable for CJS named-export detection
+//
+// Node.js uses cjs-module-lexer to detect named exports from CJS modules.
+// The lexer needs shorthand {NodeWorker} in the dead-code hint, which
+// requires a real variable (not a property expression like ue.default).
+//
+// We insert: var NodeWorker=<polyfillVar>.default;
+// before the async function that follows the web-worker import.
 // ---------------------------------------------------------------------------
-const P3_BEFORE = 'var ue=f(de());async function Ye';
-const P3_AFTER  = 'var ue=f(de());var NodeWorker=ue.default;async function Ye';
-
-if (src.includes(P3_AFTER)) {
+const P3_GUARD = 'var NodeWorker=';
+if (src.includes(P3_GUARD)) {
   console.log('Patch 3 already applied.');
-} else if (src.includes(P3_BEFORE)) {
-  src = src.replace(P3_BEFORE, P3_AFTER);
-  console.log('Patch 3 applied: var NodeWorker declared.');
-  changed = true;
 } else {
-  console.error('ERROR: Patch 3 anchor not found in bundle. Bundle may have changed.');
-  console.error(`Expected: ${P3_BEFORE}`);
-  process.exit(1);
+  const webWorkerVarRe = /var (\w+)=(\w+\(\w+\(\)\));(async function)/;
+  const m3 = src.match(webWorkerVarRe);
+  if (m3) {
+    const [full, polyfillVar, requireExpr, asyncFn] = m3;
+    const replacement = `var ${polyfillVar}=${requireExpr};var NodeWorker=${polyfillVar}.default;${asyncFn}`;
+    src = src.replace(full, replacement);
+    console.log(`Patch 3 applied: var NodeWorker declared.`);
+    changed = true;
+  } else {
+    console.error('ERROR: Patch 3 — could not find web-worker var pattern.');
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Patch 4: Add NodeWorker to the dead-code ESM named-export hint
-//   Node.js uses `0&&(module.exports={...})` for static analysis of named
-//   exports when a CJS module is imported via ESM dynamic import().
-//   Must use shorthand {NodeWorker,...} — NodeWorker var declared in Patch 3.
+//
+// esbuild emits: 0&&(module.exports={AsyncDuckDB,...})
+// We prepend NodeWorker to the list.
 // ---------------------------------------------------------------------------
-const P4_BEFORE = '0&&(module.exports={AsyncDuckDB,';
-const P4_AFTER  = '0&&(module.exports={NodeWorker,AsyncDuckDB,';
-
-if (src.includes(P4_AFTER)) {
+const P4_ANCHOR = '0&&(module.exports={';
+const P4_PATCHED = '0&&(module.exports={NodeWorker,';
+if (src.includes(P4_PATCHED)) {
   console.log('Patch 4 already applied.');
-} else if (src.includes(P4_BEFORE)) {
-  src = src.replace(P4_BEFORE, P4_AFTER);
+} else if (src.includes(P4_ANCHOR)) {
+  src = src.replace(P4_ANCHOR, P4_PATCHED);
   console.log('Patch 4 applied: NodeWorker added to ESM named-export hint.');
   changed = true;
 } else {
-  console.error('ERROR: Patch 3 anchor not found in bundle. Bundle may have changed.');
-  console.error(`Expected: ${P3_BEFORE}`);
+  console.error('ERROR: Patch 4 — could not find 0&&(module.exports={ pattern.');
   process.exit(1);
 }
 

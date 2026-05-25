@@ -18,7 +18,6 @@ rm -rf "$ROOT_DIR/build-docker"
 rm -rf "$ROOT_DIR/extension-dist"
 echo "  removed build/, build-docker/, extension-dist/"
 
-rm -f "$ROOT_DIR"/packages/duckdb-wasm/src/bindings/duckdb-mvp.{wasm,js,pthread.js}
 rm -f "$ROOT_DIR"/packages/duckdb-wasm/src/bindings/duckdb-eh.{wasm,js,pthread.js}
 rm -f "$ROOT_DIR"/packages/duckdb-wasm/src/bindings/duckdb-coi.{wasm,js,pthread.js}
 echo "  removed generated bindings"

@@ -65,10 +65,6 @@ async function main() {
 
   // Configure bundles pointing at our dist/
   const BUNDLES = {
-    mvp: {
-      mainModule: join(DIST_DIR, 'duckdb-mvp.wasm'),
-      mainWorker: join(DIST_DIR, 'duckdb-node-mvp.worker.cjs'),
-    },
     eh: {
       mainModule: join(DIST_DIR, 'duckdb-eh.wasm'),
       mainWorker: join(DIST_DIR, 'duckdb-node-eh.worker.cjs'),
@@ -77,8 +73,7 @@ async function main() {
 
   console.log('--- Selecting bundle ---');
   const bundle = await duckdb.selectBundle(BUNDLES);
-  const bundleName = bundle.mainModule.includes('mvp') ? 'mvp' : 'eh';
-  console.log(`  Selected: ${bundleName}`);
+  console.log(`  Selected: eh`);
 
   console.log('--- Instantiating DuckDB ---');
   const logger = new duckdb.ConsoleLogger();

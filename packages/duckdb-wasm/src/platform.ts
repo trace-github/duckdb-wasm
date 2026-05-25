@@ -25,7 +25,7 @@ export const isSafari = () => /^((?!chrome|android).)*safari/i.test(userAgent())
  * - COI: cross origin isolation
  */
 export interface DuckDBBundles {
-    mvp: {
+    mvp?: {
         mainModule: string;
         mainWorker: string;
     };
@@ -43,15 +43,15 @@ export interface DuckDBBundles {
 export function getJsDelivrBundles(): DuckDBBundles {
     const jsdelivr_dist_url = `https://cdn.jsdelivr.net/npm/${PACKAGE_NAME}@${PACKAGE_VERSION}/dist/`;
     return {
-        mvp: {
-            mainModule: `${jsdelivr_dist_url}duckdb-mvp.wasm`,
-            mainWorker: `${jsdelivr_dist_url}duckdb-browser-mvp.worker.js`,
-        },
         eh: {
             mainModule: `${jsdelivr_dist_url}duckdb-eh.wasm`,
             mainWorker: `${jsdelivr_dist_url}duckdb-browser-eh.worker.js`,
         },
-        // COI is still experimental, let the user opt in explicitly
+        coi: {
+            mainModule: `${jsdelivr_dist_url}duckdb-coi.wasm`,
+            mainWorker: `${jsdelivr_dist_url}duckdb-browser-coi.worker.js`,
+            pthreadWorker: `${jsdelivr_dist_url}duckdb-browser-coi.pthread.worker.js`,
+        },
     };
 }
 
@@ -125,9 +125,13 @@ export async function selectBundle(bundles: DuckDBBundles): Promise<DuckDBBundle
             };
         }
     }
+    const fallback = bundles.mvp ?? bundles.eh;
+    if (!fallback) {
+        throw new Error('No suitable DuckDB bundle found for this platform');
+    }
     return {
-        mainModule: bundles.mvp.mainModule,
-        mainWorker: bundles.mvp.mainWorker,
+        mainModule: fallback.mainModule,
+        mainWorker: fallback.mainWorker,
         pthreadWorker: null,
     };
 }

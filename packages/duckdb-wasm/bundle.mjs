@@ -22,13 +22,10 @@ import { execSync } from 'child_process';
 // Bundles:
 //   duckdb-browser.mjs                           - ESM Default Browser Bundle
 //   duckdb-browser-blocking.mjs                  - ESM Blocking Browser Bundle (synchronous API, unstable)
-//   duckdb-browser-mvp.worker.js                 - IIFE Web Worker for Wasm MVP
-//   duckdb-browser-eh.worker.js                  - IIFE Web Worker with Wasm EH
 //   duckdb-browser-coi.worker.js                 - IIFE Web Worker with Wasm EH + COI
 //   duckdb-browser-coi.pthread.worker.js         - IIFE PThread Worker with Wasm EH + COI
 //   duckdb-node.cjs                              - CommonJS Default Node Bundle
 //   duckdb-node-blocking.cjs                     - CommonJS Blocking Node Bundle (synchronous API, unstable)
-//   duckdb-node-mvp.worker.cjs                   - CommonJS Worker for Wasm MVP
 //   duckdb-node-eh.worker.cjs                    - CommonJS Worker with Wasm EH
 //   tests-browser.js                             - IIFE Jasmine Karma tests
 //   tests-node.cjs                               - CommonJS Jasmine Node tests
@@ -94,14 +91,12 @@ rimrafSync(`${dist}/*.cjs.map`);
 // Copy WASM files
 
 const src = path.resolve(__dirname, 'src');
-fs.copyFile(path.resolve(src, 'bindings', 'duckdb-mvp.wasm'), path.resolve(dist, 'duckdb-mvp.wasm'), printErr);
 fs.copyFile(path.resolve(src, 'bindings', 'duckdb-eh.wasm'), path.resolve(dist, 'duckdb-eh.wasm'), printErr);
 fs.copyFile(path.resolve(src, 'bindings', 'duckdb-coi.wasm'), path.resolve(dist, 'duckdb-coi.wasm'), printErr);
 
 (async () => {
     // Don't attempt to bundle NodeJS modules in the browser build.
     console.log('[ ESBUILD ] Patch bindings');
-    patchFile('./src/bindings/duckdb-mvp.js', 'child_process');
     patchFile('./src/bindings/duckdb-eh.js', 'child_process');
     patchFile('./src/bindings/duckdb-coi.js', 'child_process');
     patchFile('./src/bindings/duckdb-coi.pthread.js', 'vm');
@@ -172,36 +167,6 @@ fs.copyFile(path.resolve(src, 'bindings', 'duckdb-coi.wasm'), path.resolve(dist,
         },
     });
 
-    console.log('[ ESBUILD ] duckdb-browser-mvp.worker.js');
-    await esbuild.build({
-        entryPoints: ['./src/targets/duckdb-browser-mvp.worker.ts'],
-        outfile: 'dist/duckdb-browser-mvp.worker.js',
-        platform: 'browser',
-        format: 'iife',
-        globalName: 'duckdb',
-        target: TARGET_BROWSER,
-        bundle: true,
-        minify: !is_debug,
-        sourcemap: is_debug ? 'inline' : true,
-        external: EXTERNALS_WEBWORKER,
-        define: { 'process.release.name': '"browser"' },
-    });
-
-    console.log('[ ESBUILD ] duckdb-browser-eh.worker.js');
-    await esbuild.build({
-        entryPoints: ['./src/targets/duckdb-browser-eh.worker.ts'],
-        outfile: 'dist/duckdb-browser-eh.worker.js',
-        platform: 'browser',
-        format: 'iife',
-        globalName: 'duckdb',
-        target: TARGET_BROWSER,
-        bundle: true,
-        minify: !is_debug,
-        sourcemap: is_debug ? 'inline' : true,
-        external: EXTERNALS_WEBWORKER,
-        define: { 'process.release.name': '"browser"' },
-    });
-
     console.log('[ ESBUILD ] duckdb-browser-coi.worker.js');
     await esbuild.build({
         entryPoints: ['./src/targets/duckdb-browser-coi.worker.ts'],
@@ -252,19 +217,6 @@ fs.copyFile(path.resolve(src, 'bindings', 'duckdb-coi.wasm'), path.resolve(dist,
     await esbuild.build({
         entryPoints: ['./src/targets/duckdb-node-blocking.ts'],
         outfile: 'dist/duckdb-node-blocking.cjs',
-        platform: 'node',
-        format: 'cjs',
-        target: TARGET_NODE,
-        bundle: true,
-        minify: !is_debug,
-        sourcemap: is_debug ? 'inline' : true,
-        external: EXTERNALS_NODE,
-    });
-
-    console.log('[ ESBUILD ] duckdb-node-mvp.worker.cjs');
-    await esbuild.build({
-        entryPoints: ['./src/targets/duckdb-node-mvp.worker.ts'],
-        outfile: 'dist/duckdb-node-mvp.worker.cjs',
         platform: 'node',
         format: 'cjs',
         target: TARGET_NODE,

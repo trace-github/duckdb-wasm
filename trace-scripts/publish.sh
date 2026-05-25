@@ -17,7 +17,7 @@ if [ ! -d "$PKG_DIR/dist" ]; then
     exit 1
 fi
 
-for variant in mvp eh coi; do
+for variant in eh coi; do
     if [ ! -f "$PKG_DIR/dist/duckdb-${variant}.wasm" ]; then
         echo "ERROR: dist/duckdb-${variant}.wasm not found. Run ./build-wasm.sh first." >&2
         exit 1

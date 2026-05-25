@@ -31,10 +31,6 @@ async function run() {
   const globalPostMessageAfter = typeof globalThis.postMessage;
 
   const BUNDLES = {
-    mvp: {
-      mainModule: join(DIST_DIR, 'duckdb-mvp.wasm'),
-      mainWorker: join(DIST_DIR, 'duckdb-node-mvp.worker.cjs'),
-    },
     eh: {
       mainModule: join(DIST_DIR, 'duckdb-eh.wasm'),
       mainWorker: join(DIST_DIR, 'duckdb-node-eh.worker.cjs'),

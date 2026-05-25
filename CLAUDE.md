@@ -4,18 +4,23 @@ Fork of [duckdb/duckdb-wasm](https://github.com/duckdb/duckdb-wasm) with statica
 
 ## What this repo does
 
-Builds `@run-trace/duckdb-wasm` — the upstream duckdb-wasm package with bundled extensions so they don't need runtime installation. Zero changes to upstream TypeScript/JavaScript source.
+Builds `@run-trace/duckdb-wasm` — the upstream duckdb-wasm package with bundled extensions so they don't need runtime installation.
 
 ## Bundled extensions
 
 json, parquet, icu, tpcds, tpch, fts, hash_ext (custom Rust), lua
 
+## Build variants
+
+- **COI** (browser) — pthreads + WasmFS for native OPFS. Uses Emscripten 4.0.3.
+- **EH** (node) — wasm exceptions, no threads. Uses Emscripten 4.0.3.
+- MVP was removed — all modern browsers support COI.
+
 ## Key rules
 
-- **Never modify upstream source** — `packages/duckdb-wasm/src/`, `bundle.mjs`, `wasm_build_lib.sh`, `arrow.cmake` are untouched
-- **Only `package.json`** changes in the upstream package (name, version)
+- **Minimal upstream source changes** — `packages/duckdb-wasm/src/` changes are limited to removing MVP support (`platform.ts`, blocking targets, node base bindings). `wasm_build_lib.sh` and `arrow.cmake` are untouched.
 - **Post-build bundle patches** — `dist/` files are patched after every WASM build (called automatically by `build-wasm.sh`). These are NOT source modifications — `dist/` is not tracked in git.
-  - `trace-scripts/patch-node-bundle.mjs` — patches `dist/duckdb-node.cjs` to export `NodeWorker` and guard `He()` so DuckDB works in Node.js worker threads.
+  - `trace-scripts/patch-node-bundle.mjs` — patches `dist/duckdb-node.cjs` to export `NodeWorker` and guard the worker bootstrap so DuckDB works in Node.js worker threads. Uses regex patterns (not minified variable names) for robustness.
   - `trace-scripts/patch-browser-workers.mjs` — patches `dist/duckdb-browser-*.worker.js` to fix a DuckDB v1.5.2 OPFS path normalization regression (see "OPFS browser worker patch" section below).
 - **Use `yarn install` inside the Docker build** (not npm) — upstream's `yarn.lock` pins compatible dep versions. This only applies to the WASM build container, not to client projects consuming the published package.
 - **If tests fail, the build is wrong** — never change tests to fix builds

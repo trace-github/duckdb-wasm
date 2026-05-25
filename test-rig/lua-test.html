@@ -54,10 +54,6 @@ async function run() {
     const { AsyncDuckDB, selectBundle, ConsoleLogger, createWorker } = mod;
 
     const DUCKDB_BUNDLES = {
-      mvp: {
-        mainModule: new URL('/dist/duckdb-mvp.wasm', window.location.href).href,
-        mainWorker: new URL('/dist/duckdb-browser-mvp.worker.js', window.location.href).href,
-      },
       eh: {
         mainModule: new URL('/dist/duckdb-eh.wasm', window.location.href).href,
         mainWorker: new URL('/dist/duckdb-browser-eh.worker.js', window.location.href).href,

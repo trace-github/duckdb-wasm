@@ -41,15 +41,8 @@ cargo +nightly build \
 echo "=== Rust libraries built ==="
 cd /src
 
-echo "=== Building WASM targets (MVP + EH with emsdk 3.1.71) ==="
-/src/scripts/wasm_build_lib.sh relperf mvp
+echo "=== Building WASM targets (EH + COI with emsdk 4.0.3) ==="
 /src/scripts/wasm_build_lib.sh relperf eh
-
-echo "=== Switching to emsdk 4.0.3 for COI ==="
-/opt/emsdk/emsdk activate 4.0.3 2>/dev/null
-source /opt/emsdk/emsdk_env.sh 2>/dev/null
-
-echo "=== Building WASM target (COI with emsdk 4.0.3) ==="
 /src/scripts/wasm_build_lib.sh relperf coi
 
 echo "=== Building JS/TS package ==="
@@ -61,10 +54,20 @@ cd packages/duckdb-wasm
 
 # Patch Emscripten-generated JS: esbuild browser bundles can't resolve Node
 # built-in "crypto". Same trick bundle.mjs uses for "child_process".
-for f in src/bindings/duckdb-mvp.js src/bindings/duckdb-eh.js src/bindings/duckdb-coi.js; do
+for f in src/bindings/duckdb-eh.js src/bindings/duckdb-coi.js; do
   if grep -q 'require("crypto")' "$f" 2>/dev/null; then
     sed -i 's/require("crypto")/["crypto"].map(require).pop()/g' "$f"
     echo "  Patched crypto require in $f"
+  else
+    echo "  No crypto require found in $f (not needed for this Emscripten version)"
+  fi
+done
+
+# Verify no unpatched require("crypto") remains — esbuild browser bundles can't resolve it
+for f in src/bindings/duckdb-eh.js src/bindings/duckdb-coi.js; do
+  if grep -q 'require("crypto")' "$f" 2>/dev/null; then
+    echo "ERROR: require(\"crypto\") still present in $f after patching" >&2
+    exit 1
   fi
 done
 
@@ -86,15 +89,20 @@ if (src.includes(anchor) && !src.includes("else if (Module[\"wasmMemory\"])")) {
     fs.writeFileSync(f, src);
     console.log("  Patched COI pthread wasmMemory initialization");
   } else {
-    console.log("  WARNING: COI pthread wasmMemory anchor not found after ENVIRONMENT_IS_PTHREAD");
+    console.error("  ERROR: COI pthread wasmMemory anchor not found after ENVIRONMENT_IS_PTHREAD");
+    process.exit(1);
   }
 } else if (src.includes("else if (Module[\"wasmMemory\"])")) {
   console.log("  COI pthread wasmMemory patch already applied");
 } else {
-  console.log("  WARNING: COI pthread wasmMemory patch anchor not found");
+  console.error("  ERROR: COI pthread wasmMemory patch anchor not found — Emscripten output may have changed");
+  process.exit(1);
 }
 '
 
+# Clean dist/ before bundling — rimrafSync inside bundle.mjs doesn't always
+# delete hardlinked files from Docker volume mounts.
+rm -rf dist/
 node bundle.mjs release && npx tsc --emitDeclarationOnly
 
 echo "=== Building test-rig Arrow bundle ==="
