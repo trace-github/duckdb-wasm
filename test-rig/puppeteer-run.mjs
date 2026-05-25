@@ -46,6 +46,7 @@ for (let i = 0; i < args.length; i++) {
     case '--lua':           page = '/lua-test.html'; break;
     case '--hash-ext':      page = '/hash-ext-test.html'; break;
     case '--metric-table':  page = '/metric-table-test.html'; break;
+    case '--opfs-open':     page = '/opfs-open-test.html'; break;
     default:
       console.error(`Unknown option: ${args[i]}`);
       process.exit(1);

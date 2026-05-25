@@ -34,6 +34,21 @@ The upstream bundle includes a web-worker polyfill that mutates `global.postMess
 
 The patch is applied automatically by `build-wasm.sh` via `trace-scripts/patch-node-bundle.mjs`. The `dist/` directory is not tracked in git.
 
+### OPFS path normalization fix (v1.5.2 regression)
+
+DuckDB v1.5.2 introduced a regression where the C++ side internally normalizes `opfs://file.db` to `opfs:/file.db` (single slash) and then opens the file a second time. The JS runtime's `inferDataProtocol("opfs:/...")` doesn't recognize the single-slash prefix and defaults to `BROWSER_FILEREADER` (read-only), causing "HTML FileReaders do not support writing" errors when writing to OPFS databases.
+
+We apply a post-build patch to `dist/duckdb-browser-*.worker.js` that:
+
+1. Registers OPFS files with the C++ filesystem under both `opfs://` and `opfs:/` path forms, so the second internal open finds the correct `BROWSER_FSACCESS` protocol
+2. Stores OPFS handles in JS runtime maps under both key forms
+3. Removes a `getSize()` check that prevented new (empty) database files from being registered
+4. Guards the COI worker's `postMessage` of OPFS handles to pthreads — `FileSystemSyncAccessHandle` is not cloneable, so the upstream code throws `DataCloneError` without this fix
+
+The patch is applied automatically by `build-wasm.sh` via `trace-scripts/patch-browser-workers.mjs`.
+
+**When to revert:** This patch can be removed when upstream duckdb-wasm fixes the path normalization in a future release. To test if it's still needed: skip the patch, rebuild, and run `node test-rig/puppeteer-run.mjs --opfs-open`. If the test passes without the patch, the upstream fix landed and you can remove the `patch-browser-workers.mjs` call from `build-wasm.sh`.
+
 ## Installation
 
 ```bash

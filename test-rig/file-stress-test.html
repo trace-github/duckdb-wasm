@@ -137,6 +137,11 @@ async function run() {
         mainModule: new URL('/dist/duckdb-eh.wasm', window.location.href).href,
         mainWorker: new URL('/dist/duckdb-browser-eh.worker.js', window.location.href).href,
       },
+      coi: {
+        mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+        pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+      },
     };
 
     addLog('info', 'Selecting bundle...');

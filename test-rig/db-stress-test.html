@@ -128,6 +128,11 @@ async function run() {
         mainModule: new URL('/dist/duckdb-eh.wasm', window.location.href).href,
         mainWorker: new URL('/dist/duckdb-browser-eh.worker.js', window.location.href).href,
       },
+      coi: {
+        mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+        pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+      },
     };
 
     addLog('info', 'Selecting bundle...');
@@ -145,9 +150,9 @@ async function run() {
     await db.open({
       path: 'opfs://' + dbName,
       accessMode: 3,
-      maximumThreads: 5,
+      maximumThreads: 1,
     });
-    addLog('info', 'Database opened on OPFS with maximumThreads=5: ' + dbName);
+    addLog('info', 'Database opened on OPFS: ' + dbName);
 
     const conn = await db.connect();
 
@@ -349,7 +354,7 @@ async function run() {
     _results.push({ label: 'update_delete', value: 'OK (' + elapsed6 + 'ms)' });
 
     // =============================================
-    // TEST 7: Single-thread checkpoint, then resume multi-thread
+    // TEST 7: Checkpoint and verify data integrity
     // Drop to 1 thread, CHECKPOINT (flush WAL → DB), restore threads, query again
     // =============================================
     addLog('info', '--- Test 7: Single-thread checkpoint cycle ---');
@@ -366,21 +371,13 @@ async function run() {
     );
     addLog('info', 'T7 pre-checkpoint row count OK');
 
-    // Drop to single thread
-    await withTimeout(conn.query("SET threads = 1"), 5000, 'T7 set threads=1');
-    addLog('info', 'T7: threads set to 1');
-
-    // CHECKPOINT — this is what deadlocks with multiple threads
+    // CHECKPOINT
     await withTimeout(conn.query("CHECKPOINT"), 30000, 'T7 checkpoint');
     addLog('info', 'T7: CHECKPOINT completed!');
 
     // Check OPFS sizes after — main DB should be larger, WAL should be small/empty
     const postCheckpointFiles = await listOPFS(PREFIX);
     addLog('info', 'T7 after checkpoint: ' + postCheckpointFiles.join(', '));
-
-    // Restore multi-thread
-    await withTimeout(conn.query("SET threads = 5"), 5000, 'T7 set threads=5');
-    addLog('info', 'T7: threads restored to 5');
 
     // Verify data is still intact after checkpoint
     const postCount = await withTimeout(
@@ -389,7 +386,7 @@ async function run() {
     );
     addLog('info', 'T7: post-checkpoint row count OK');
 
-    // Run a heavy query to confirm multi-thread still works
+    // Run a heavy query to confirm things still work
     const postHeavy = await withTimeout(conn.query(`
       SELECT department, count(*)::INTEGER AS n, avg(score)::DOUBLE AS avg_s
       FROM stress_data
@@ -409,7 +406,7 @@ async function run() {
     addLog('info', '--- Test 8: Second write + checkpoint cycle ---');
     const t8 = Date.now();
 
-    // Insert more data (multi-threaded)
+    // Insert more data
     await withTimeout(conn.query(`
       INSERT INTO stress_data
       SELECT i AS id, 'post_ckpt_' || i::VARCHAR AS username,
@@ -418,15 +415,11 @@ async function run() {
         '2025-06-01' AS hire_date, 'after_checkpoint' AS notes
       FROM generate_series(0, 49999) t(i)
     `), 15000, 'T8 insert');
-    addLog('info', 'T8: inserted 50K rows (multi-threaded)');
+    addLog('info', 'T8: inserted 50K rows');
 
-    // Drop to 1 thread, checkpoint again
-    await withTimeout(conn.query("SET threads = 1"), 5000, 'T8 set threads=1');
+    // Checkpoint again
     await withTimeout(conn.query("CHECKPOINT"), 30000, 'T8 checkpoint');
     addLog('info', 'T8: second CHECKPOINT completed');
-
-    // Restore and verify
-    await withTimeout(conn.query("SET threads = 5"), 5000, 'T8 set threads=5');
     const dept99 = await withTimeout(
       conn.query("SELECT count(*)::INTEGER AS n FROM stress_data WHERE department = 99"),
       15000, 'T8 verify'

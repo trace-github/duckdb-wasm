@@ -37,4 +37,7 @@ docker run --rm \
 echo "=== Patching Node bundle ==="
 node "$SCRIPT_DIR/patch-node-bundle.mjs"
 
+echo "=== Patching browser workers (OPFS fix) ==="
+node "$SCRIPT_DIR/patch-browser-workers.mjs"
+
 echo "=== Done ==="

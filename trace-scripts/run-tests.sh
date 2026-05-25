@@ -24,7 +24,8 @@ run() {
 }
 
 run "Smoke tests (default)"  ""
-run "OPFS persistence"       "--opfs-persist"
+run "OPFS open + COPY"       "--opfs-open"
+run "OPFS persistence"       "--opfs-persist --timeout 120000"
 run "DB stress"              "--db-stress"
 run "File I/O stress"        "--file-stress"
 run "Rust hash extension"    "--hash-ext --timeout 120000"

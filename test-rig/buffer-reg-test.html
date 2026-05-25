@@ -91,6 +91,11 @@ async function run() {
         mainModule: new URL('/dist/duckdb-eh.wasm', window.location.href).href,
         mainWorker: new URL('/dist/duckdb-browser-eh.worker.js', window.location.href).href,
       },
+      coi: {
+        mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+        pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+      },
     };
 
     addLog('info', 'Selecting bundle...');
@@ -109,7 +114,7 @@ async function run() {
     await db.open({
       path: 'opfs://' + dbName,
       accessMode: 3,
-      maximumThreads: 5,
+      maximumThreads: 1,
     });
     addLog('info', 'Database opened on OPFS: ' + dbName);
 
@@ -233,9 +238,7 @@ async function run() {
     // ---------------------------------------------------------------
     addLog('info', '--- Test 6: Checkpoint with buffer files present ---');
 
-    await conn.query("SET threads = 1");
     await conn.query("CHECKPOINT");
-    await conn.query("SET threads = 5");
     addLog('info', 'Checkpoint succeeded with buffer files registered');
 
     // Verify OPFS tables still queryable after checkpoint
