@@ -84,6 +84,9 @@ set(DUCKDB_PLATFORM "wasm_mvp")
 if(EMSCRIPTEN)
   # Bump stack size from default 64KB to 1MB
   set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -sSTACK_SIZE=1048576")
+  # Disable BigInt — Emscripten 3.1.48+ defaults to WASM_BIGINT=1 but
+  # bundle.mjs targets chrome64 which doesn't support BigInt literals.
+  set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -sWASM_BIGINT=0")
   # Release build
   if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNDEBUG")
@@ -135,7 +138,7 @@ if(EMSCRIPTEN)
   if(WITH_WASM_THREADS)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -sUSE_PTHREADS=1 -DWEBDB_THREADS=1")
     set(DUCKDB_CXX_FLAGS "${CMAKE_CXX_FLAGS} -sUSE_PTHREADS=1")
-    set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -sUSE_PTHREADS=1 -sPTHREAD_POOL_SIZE=4 -pthread")
+    set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -sUSE_PTHREADS=1 -sPTHREAD_POOL_SIZE=4 -pthread -sWASMFS -lopfs.js")
     set(DUCKDB_PLATFORM "wasm_threads")
   else()
     set(CMAKE_CXX_FLAGS
@@ -160,7 +163,10 @@ if (DUCKDB_WASM_LOADABLE_EXTENSIONS)
     set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -s MAIN_MODULE=1 -s EXPORTED_FUNCTIONS='@../../../lib/base_exported_list.txt'")
   endif()
 else()
-  set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -s FILESYSTEM=0 -s ENVIRONMENT='web,node,worker' -s EXPORTED_FUNCTIONS='@../../../lib/base_exported_list.txt'")
+  if(NOT WITH_WASM_THREADS)
+    set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -s FILESYSTEM=0")
+  endif()
+  set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -s ENVIRONMENT='web,node,worker' -s EXPORTED_FUNCTIONS='@../../../lib/base_exported_list.txt'")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -233,6 +239,7 @@ add_library(
   ${CMAKE_SOURCE_DIR}/src/io/glob.cc
   ${CMAKE_SOURCE_DIR}/src/io/ifstream.cc
   ${CMAKE_SOURCE_DIR}/src/io/memory_filesystem.cc
+  ${CMAKE_SOURCE_DIR}/src/io/wasmfs_filesystem.cc
   ${CMAKE_SOURCE_DIR}/src/io/web_filesystem.cc
   ${CMAKE_SOURCE_DIR}/src/json_analyzer.cc
   ${CMAKE_SOURCE_DIR}/src/json_dataview.cc
@@ -321,6 +328,9 @@ endif()
      # --pre-js "/Users/carlo/databricks/duckdb_delta/file_system_packager.js" \
 #
 if(EMSCRIPTEN)
+  if(WITH_WASM_THREADS)
+    target_compile_definitions(duckdb_web PRIVATE DUCKDB_WASMFS=1)
+  endif()
   add_executable(duckdb_wasm ${CMAKE_SOURCE_DIR}/src/wasm_main.cc)
   target_link_libraries(duckdb_wasm duckdb_web ${THREAD_LIBS})
   message(STATUS "WASM_LINK_FLAGS=${WASM_LINK_FLAGS}")

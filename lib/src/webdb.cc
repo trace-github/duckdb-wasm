@@ -67,6 +67,10 @@
 #include "duckdb/web/io/file_page_buffer.h"
 #include "duckdb/web/io/ifstream.h"
 #include "duckdb/web/io/web_filesystem.h"
+#ifdef DUCKDB_WASMFS
+#include "duckdb/web/io/wasmfs_filesystem.h"
+#include <emscripten/wasmfs.h>
+#endif
 #include "duckdb/web/json_analyzer.h"
 #include "duckdb/web/json_dataview.h"
 #include "duckdb/web/json_insert_options.h"
@@ -984,6 +988,17 @@ arrow::Status WebDB::Open(std::string_view args_json) {
         db_config.SetOptionByName("duckdb_api", "wasm");
         db_config.options.custom_user_agent = config_->custom_user_agent;
         db_config.options.use_direct_io = config_->use_direct_io;
+#ifdef DUCKDB_WASMFS
+        // Mount OPFS as /opfs via WasmFS
+        static bool opfs_mounted = false;
+        if (!opfs_mounted) {
+            auto backend = wasmfs_create_opfs_backend();
+            wasmfs_create_directory("/opfs", 0777, backend);
+            opfs_mounted = true;
+        }
+        // Register WasmFS subsystem so opfs:// paths route through POSIX I/O
+        db_config.file_system->RegisterSubSystem(make_uniq<io::WasmFSFileSystem>());
+#endif
         auto db = make_shared_ptr<duckdb::DuckDB>(config_->path, &db_config);
 #ifndef WASM_LOADABLE_EXTENSIONS
         duckdb_web_parquet_init(db.get());

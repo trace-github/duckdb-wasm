@@ -20,15 +20,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # Install js-beautify globally (needed by wasm_build_lib.sh)
 RUN npm install -g js-beautify
 
-# Install Emscripten SDK (matching upstream CI at v1.5.2)
+# Install Emscripten SDK
 #   3.1.71 for MVP/EH builds
-#   3.1.57 for COI builds (newer versions break pthread worker spawning)
+#   4.0.3 for COI builds (required for WasmFS OPFS support)
 ENV EMSDK=/opt/emsdk
 RUN git clone https://github.com/emscripten-core/emsdk.git $EMSDK \
     && cd $EMSDK \
     && ./emsdk install 3.1.71 \
     && ./emsdk activate 3.1.71
-RUN cd $EMSDK && ./emsdk install 3.1.57
+RUN cd $EMSDK && ./emsdk install 4.0.3
 
 # Upgrade binaryen: LLVM in emsdk 3.1.71 produces wasm with bulk-memory-opt
 # feature flag, which the bundled binaryen v117 doesn't support.

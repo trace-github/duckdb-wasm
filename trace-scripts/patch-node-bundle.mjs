@@ -79,8 +79,8 @@ if (src.includes(P2_AFTER)) {
 //   dead-code hint — it does not handle property-value expressions like
 //   {NodeWorker:ue.default}. Declaring a real var gives us the shorthand.
 // ---------------------------------------------------------------------------
-const P3_BEFORE = 'var ue=N(de());async function Ye';
-const P3_AFTER  = 'var ue=N(de());var NodeWorker=ue.default;async function Ye';
+const P3_BEFORE = 'var ue=f(de());async function Ye';
+const P3_AFTER  = 'var ue=f(de());var NodeWorker=ue.default;async function Ye';
 
 if (src.includes(P3_AFTER)) {
   console.log('Patch 3 already applied.');

@@ -1,4 +1,4 @@
-import { DuckDBBindings, DuckDBDataProtocol } from '../bindings';
+import { DuckDBBindings, DuckDBDataProtocol, DuckDBFeature } from '../bindings';
 import { WorkerResponseVariant, WorkerRequestVariant, WorkerRequestType, WorkerResponseType } from './worker_request';
 import { Logger, LogEntryVariant } from '../log';
 import { InstantiationProgress } from '../bindings/progress';
@@ -136,7 +136,8 @@ export abstract class AsyncDuckDBDispatcher implements Logger {
 
                 case WorkerRequestType.OPEN: {
                     const path = request.data.path;
-                    if (path?.startsWith('opfs://')) {
+                    const hasWasmFS = !!(this._bindings!.getFeatureFlags() & DuckDBFeature.WASMFS);
+                    if (path?.startsWith('opfs://') && !hasWasmFS) {
                         await this._bindings.prepareDBFileHandle(path, DuckDBDataProtocol.BROWSER_FSACCESS);
                         request.data.useDirectIO = true;
                     }
@@ -361,10 +362,14 @@ export abstract class AsyncDuckDBDispatcher implements Logger {
                     this.sendOK(request);
                     break;
 
-                case WorkerRequestType.REGISTER_OPFS_FILE_NAME:
-                    await this._bindings.registerOPFSFileName(request.data[0]);
+                case WorkerRequestType.REGISTER_OPFS_FILE_NAME: {
+                    const hasWasmFS = !!(this._bindings!.getFeatureFlags() & DuckDBFeature.WASMFS);
+                    if (!hasWasmFS) {
+                        await this._bindings.registerOPFSFileName(request.data[0]);
+                    }
                     this.sendOK(request);
                     break;
+                }
 
                 case WorkerRequestType.EXPORT_FILE_STATISTICS: {
                     this.postMessage(

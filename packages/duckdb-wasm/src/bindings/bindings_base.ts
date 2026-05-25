@@ -28,6 +28,7 @@ export enum DuckDBFeature {
     WASM_SIMD = 1 << 2,
     WASM_BULK_MEMORY = 1 << 3,
     EMIT_BIGINT = 1 << 4,
+    WASMFS = 1 << 5,
 }
 
 /** The proxy for either the browser- order node-based DuckDB API */
@@ -135,8 +136,8 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     /** Tokenize a script */
     public tokenize(text: string): ScriptTokens {
         const BUF = TEXT_ENCODER.encode(text);
-        const bufferPtr = this.mod._malloc(BUF.length);
-        const bufferOfs = this.mod.HEAPU8.subarray(bufferPtr, bufferPtr + BUF.length);
+        const bufferPtr = this.mod._malloc(BUF.length) >>> 0;
+        const bufferOfs = new Uint8Array(this.mod.HEAPU8.buffer, bufferPtr, BUF.length);
         bufferOfs.set(BUF);
         const [s, d, n] = callSRet(
             this.mod,
@@ -174,8 +175,8 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     /** Send a query and return the full result */
     public runQuery(conn: number, text: string): Uint8Array {
         const BUF = TEXT_ENCODER.encode(text);
-        const bufferPtr = this.mod._malloc(BUF.length);
-        const bufferOfs = this.mod.HEAPU8.subarray(bufferPtr, bufferPtr + BUF.length);
+        const bufferPtr = this.mod._malloc(BUF.length) >>> 0;
+        const bufferOfs = new Uint8Array(this.mod.HEAPU8.buffer, bufferPtr, BUF.length);
         bufferOfs.set(BUF);
         const [s, d, n] = callSRet(
             this.mod,
@@ -199,8 +200,8 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
      */
     public startPendingQuery(conn: number, text: string, allowStreamResult: boolean = false): Uint8Array | null {
         const BUF = TEXT_ENCODER.encode(text);
-        const bufferPtr = this.mod._malloc(BUF.length);
-        const bufferOfs = this.mod.HEAPU8.subarray(bufferPtr, bufferPtr + BUF.length);
+        const bufferPtr = this.mod._malloc(BUF.length) >>> 0;
+        const bufferOfs = new Uint8Array(this.mod.HEAPU8.buffer, bufferPtr, BUF.length);
         bufferOfs.set(BUF);
         const [s, d, n] = callSRet(
             this.mod,
@@ -263,8 +264,8 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     /** Get table names */
     public getTableNames(conn: number, text: string): string[] {
         const BUF = TEXT_ENCODER.encode(text);
-        const bufferPtr = this.mod._malloc(BUF.length);
-        const bufferOfs = this.mod.HEAPU8.subarray(bufferPtr, bufferPtr + BUF.length);
+        const bufferPtr = this.mod._malloc(BUF.length) >>> 0;
+        const bufferOfs = new Uint8Array(this.mod.HEAPU8.buffer, bufferPtr, BUF.length);
         bufferOfs.set(BUF);
         const [s, d, n] = callSRet(
             this.mod,
@@ -328,8 +329,8 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     /** Prepare a statement and return its identifier */
     public createPrepared(conn: number, text: string): number {
         const BUF = TEXT_ENCODER.encode(text);
-        const bufferPtr = this.mod._malloc(BUF.length);
-        const bufferOfs = this.mod.HEAPU8.subarray(bufferPtr, bufferPtr + BUF.length);
+        const bufferPtr = this.mod._malloc(BUF.length) >>> 0;
+        const bufferOfs = new Uint8Array(this.mod.HEAPU8.buffer, bufferPtr, BUF.length);
         bufferOfs.set(BUF);
         const [s, d, n] = callSRet(
             this.mod,
@@ -390,8 +391,8 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     public insertArrowFromIPCStream(conn: number, buffer: Uint8Array, options?: ArrowInsertOptions): void {
         if (buffer.length == 0) return;
         // Store buffer
-        const bufferPtr = this.mod._malloc(buffer.length);
-        const bufferOfs = this.mod.HEAPU8.subarray(bufferPtr, bufferPtr + buffer.length);
+        const bufferPtr = this.mod._malloc(buffer.length) >>> 0;
+        const bufferOfs = new Uint8Array(this.mod.HEAPU8.buffer, bufferPtr, buffer.length);
         bufferOfs.set(buffer);
         const optJSON = options ? JSON.stringify(options) : '';
 
@@ -497,8 +498,8 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     }
     /** Register a file buffer */
     public registerFileBuffer(name: string, buffer: Uint8Array): void {
-        const ptr = this.mod._malloc(buffer.length);
-        const dst = this.mod.HEAPU8.subarray(ptr, ptr + buffer.length);
+        const ptr = this.mod._malloc(buffer.length) >>> 0;
+        const dst = new Uint8Array(this.mod.HEAPU8.buffer, ptr, buffer.length);
         dst.set(buffer);
         const [s, d, n] = callSRet(
             this.mod,
@@ -690,7 +691,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
         if (s !== StatusCode.SUCCESS) {
             throw new Error(readString(this.mod, d, n));
         }
-        const buffer = this.mod.HEAPU8.subarray(d, d + n);
+        const buffer = new Uint8Array(this.mod.HEAPU8.buffer, d >>> 0, n);
         const copy = new Uint8Array(buffer.length);
         copy.set(buffer);
         dropResponseBuffers(this.mod);
@@ -716,6 +717,6 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
         if (s !== StatusCode.SUCCESS) {
             throw new Error(readString(this.mod, d, n));
         }
-        return new FileStatistics(this.mod.HEAPU8.subarray(d, d + n));
+        return new FileStatistics(new Uint8Array(this.mod.HEAPU8.buffer, d >>> 0, n));
     }
 }

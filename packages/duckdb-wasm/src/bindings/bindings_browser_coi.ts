@@ -18,11 +18,16 @@ export class DuckDB extends DuckDBBrowserBindings {
 
     /** Instantiate the bindings */
     protected instantiateImpl(moduleOverrides: Partial<DuckDBModule>): Promise<DuckDBModule> {
-        return DuckDBWasm({
+        const opts: any = {
             ...moduleOverrides,
             instantiateWasm: this.instantiateWasm.bind(this),
             locateFile: this.locateFile.bind(this),
-        });
+        };
+        // Emscripten 4.0.3 uses mainScriptUrlOrBlob (not locateFile) for pthread workers
+        if (this.pthreadWorkerURL) {
+            opts.mainScriptUrlOrBlob = this.pthreadWorkerURL;
+        }
+        return DuckDBWasm(opts);
     }
 }
 

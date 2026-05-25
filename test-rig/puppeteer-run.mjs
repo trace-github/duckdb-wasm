@@ -47,6 +47,9 @@ for (let i = 0; i < args.length; i++) {
     case '--hash-ext':      page = '/hash-ext-test.html'; break;
     case '--metric-table':  page = '/metric-table-test.html'; break;
     case '--opfs-open':     page = '/opfs-open-test.html'; break;
+    case '--wasmfs':        page = '/wasmfs-test.html'; break;
+    case '--thread-file-stress': page = '/thread-file-stress-test.html'; break;
+    case '--durability':    page = '/durability-test.html'; break;
     default:
       console.error(`Unknown option: ${args[i]}`);
       process.exit(1);

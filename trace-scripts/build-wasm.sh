@@ -2,7 +2,7 @@
 #
 # Build duckdb-wasm using Docker.
 #
-# Uses --platform linux/amd64 because Emscripten 3.1.57 only ships
+# Uses --platform linux/amd64 because Emscripten only ships
 # x86_64 Linux binaries. On Apple Silicon this uses QEMU emulation.
 #
 # Usage:

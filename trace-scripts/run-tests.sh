@@ -32,6 +32,9 @@ run "Rust hash extension"    "--hash-ext --timeout 120000"
 run "Lua extension"          "--lua"
 run "Buffer registration"    "--buffer-reg"
 run "Metric table"           "--metric-table"
+run "WasmFS + OPFS"          "--wasmfs --timeout 120000"
+run "Thread file stress"     "--thread-file-stress --timeout 300000"
+run "Durability (COI)"       "--durability --timeout 240000"
 
 # Node.js smoke tests
 (cd "$ROOT_DIR/test-node" && npm install --silent)
@@ -64,6 +67,16 @@ if node "$ROOT_DIR/test-node/smoke-test.mjs"; then
     PASS+=("Node.js hash_ext native smoke test")
 else
     FAIL+=("Node.js hash_ext native smoke test")
+fi
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Node.js WASM durability"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+if node "$ROOT_DIR/test-node/wasm-durability-test.mjs"; then
+    PASS+=("Node.js WASM durability")
+else
+    FAIL+=("Node.js WASM durability")
 fi
 
 echo ""

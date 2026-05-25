@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+<head><title>WasmFS + OPFS Feasibility Test</title></head>
+<body>
+<pre id="output">Starting WasmFS + OPFS test...</pre>
+<script>
+// Global state (same pattern as other test-rig pages)
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+</script>
+<script>
+// WasmFS OPFS backend uses Atomics.wait which blocks — must run in a Worker, not the main thread.
+(function() {
+  var t0 = Date.now();
+
+  addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+  addLog('info', 'SharedArrayBuffer available: ' + (typeof SharedArrayBuffer !== 'undefined'));
+
+  if (!crossOriginIsolated) {
+    sendReport('FAIL', { error: 'CrossOriginIsolated is false - WasmFS OPFS requires COOP/COEP headers' });
+    return;
+  }
+
+  addLog('info', 'Launching WasmFS test in worker (OPFS backend needs Atomics.wait)...');
+
+  // Set a safety timer to report timeout if worker hangs
+  var safetyTimer = setTimeout(function() {
+    addLog('error', 'Worker hung - no response after 90s. OPFS backend may have deadlocked.');
+    addLog('info', 'Collected logs so far: ' + _logs.length);
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: 'Worker hung - OPFS backend deadlock' });
+  }, 90000);
+
+  var worker = new Worker('/wasmfs-worker.js');
+
+  worker.onmessage = function(e) {
+    var msg = e.data;
+    if (msg.type === 'log') {
+      addLog(msg.level, msg.message);
+    } else if (msg.type === 'done') {
+      clearTimeout(safetyTimer);
+      var jsonResult = msg.jsonResult;
+      if (jsonResult) {
+        addLog('info', 'Parsed test results: ' + jsonResult.pass + ' passed, ' + jsonResult.fail + ' failed');
+        if (jsonResult.tests) {
+          for (var i = 0; i < jsonResult.tests.length; i++) {
+            var test = jsonResult.tests[i];
+            var value = test.status;
+            if (test.metric >= 0) value += ' (' + test.metric.toFixed(2) + ' ' + test.unit + ')';
+            if (test.detail) value += ' - ' + test.detail;
+            _results.push({ label: test.name, value: value });
+          }
+        }
+      }
+
+      // exitCode 0 means all C tests passed. jsonResult may be null if JSON parsing failed.
+      var status = (msg.exitCode === 0) ? 'PASS' : 'FAIL';
+      var elapsed = Date.now() - t0;
+
+      if (status === 'PASS') {
+        addLog('info', 'All WasmFS + OPFS tests passed in ' + elapsed + 'ms');
+      } else {
+        addLog('error', 'Some tests failed (exit code: ' + msg.exitCode + ')');
+      }
+
+      _results.push({ label: 'overall', value: status });
+      if (jsonResult) {
+        _results.push({ label: 'pass_count', value: String(jsonResult.pass) });
+        _results.push({ label: 'fail_count', value: String(jsonResult.fail) });
+      }
+
+      sendReport(status, { elapsed: elapsed, bundle: 'wasmfs-opfs' });
+    } else if (msg.type === 'error') {
+      clearTimeout(safetyTimer);
+      addLog('error', 'Worker error: ' + msg.message);
+      sendReport('FAIL', { elapsed: Date.now() - t0, error: msg.message, stack: msg.stack });
+    }
+  };
+
+  worker.onerror = function(e) {
+    clearTimeout(safetyTimer);
+    addLog('error', 'Worker failed: ' + (e.message || e));
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message || String(e) });
+  };
+})();
+</script>
+</body>
+</html>
