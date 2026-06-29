@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// Puppeteer-based test rig runner: starts server, launches headed Chrome,
-// navigates to test pages, captures console output, waits for /report POST.
+// Puppeteer-based test rig runner: starts server, launches Chrome (headless by
+// default), navigates to test pages, captures console output, waits for /report POST.
 //
 // Usage: node test-rig/puppeteer-run.mjs [options]
-//   --keep-alive      Keep server+browser running after report
+//   --keep-alive      Keep server+browser running after report (implies --headed)
+//   --headed          Launch a visible Chrome window (default: headless, so it
+//                     doesn't steal foreground focus over other apps)
 //   --port PORT       Server port (default 9876)
 //   --timeout MS      Timeout in ms (default 60000)
 //   --db-stress       Run DB stress test
@@ -30,12 +32,14 @@ const args = process.argv.slice(2);
 let port = 9876;
 let timeout = 60000;
 let keepAlive = false;
+let headed = false;
 let page = '';
 let debugPort = 9222;
 
 for (let i = 0; i < args.length; i++) {
   switch (args[i]) {
     case '--keep-alive': keepAlive = true; break;
+    case '--headed':     headed = true; break;
     case '--port':       port = parseInt(args[++i], 10); break;
     case '--timeout':    timeout = parseInt(args[++i], 10); break;
     case '--debug-port': debugPort = parseInt(args[++i], 10); break;
@@ -56,6 +60,9 @@ for (let i = 0; i < args.length; i++) {
       process.exit(1);
   }
 }
+
+// --keep-alive implies headed: if you're keeping the browser open, you want to see it.
+if (keepAlive) headed = true;
 
 // ---------------------------------------------------------------------------
 // Start the test rig server as a child process
@@ -166,6 +173,10 @@ async function main() {
       // into an existing one (which would ignore --remote-debugging-port)
       const userDataDir = join(tmpdir(), 'puppeteer-test-rig-chrome');
       const chromeProc = spawn(chromePath, [
+        // Headless by default so Chrome never steals foreground focus on macOS.
+        // There is no headed Chrome flag that prevents window activation; --headless=new
+        // is the reliable cross-platform fix. Use --headed to get a visible window.
+        headed ? null : '--headless=new',
         '--no-first-run',
         '--no-default-browser-check',
         '--enable-features=SharedArrayBuffer',
@@ -174,7 +185,7 @@ async function main() {
         '--window-position=100,100',
         '--window-size=1200,900',
         'about:blank',
-      ], {
+      ].filter(Boolean), {
         detached: true,
         stdio: 'ignore',
       });
