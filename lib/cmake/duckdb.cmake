@@ -15,7 +15,11 @@ endif()
 set(DUCKDB_CXX_FLAGS "${DUCKDB_CXX_FLAGS} -Wno-unqualified-std-cast-call -DDUCKDB_DEBUG_NO_SAFETY -DDUCKDB_FROM_DUCKDB_WASM")
 message("DUCKDB_CXX_FLAGS=${DUCKDB_CXX_FLAGS}")
 
-set(DUCKDB_EXTENSIONS "json;parquet;icu;tpcds;tpch;core_functions")
+# quack is out-of-tree: duckdb 1.5.4 ships .github/config/extensions/quack.cmake,
+# which extension_build_tools.cmake auto-includes for any name in BUILD_EXTENSIONS
+# that has a matching config (pins the GIT_URL/GIT_TAG). On wasm it builds
+# client-only (quack_serve throws NotImplemented; client uses fetch-based HTTPUtil).
+set(DUCKDB_EXTENSIONS "json;parquet;icu;tpcds;tpch;core_functions;quack")
 # Escape semicolons in DUCKDB_EXTENSIONS before passing to ExternalProject_Add
 string(REPLACE ";" "$<SEMICOLON>" DUCKDB_EXTENSIONS_PACKED "${DUCKDB_EXTENSIONS}")
 
@@ -58,7 +62,8 @@ ExternalProject_Add(
     <INSTALL_DIR>/lib/libjson_extension.a
     <INSTALL_DIR>/lib/libicu_extension.a
     <INSTALL_DIR>/lib/libtpcds_extension.a
-    <INSTALL_DIR>/lib/libtpch_extension.a)
+    <INSTALL_DIR>/lib/libtpch_extension.a
+    <INSTALL_DIR>/lib/libquack_extension.a)
 
 ExternalProject_Get_Property(duckdb_ep install_dir)
 ExternalProject_Get_Property(duckdb_ep binary_dir)
@@ -122,9 +127,15 @@ add_library(duckdb_tpch STATIC IMPORTED)
 set_property(TARGET duckdb_tpch PROPERTY IMPORTED_LOCATION ${install_dir}/lib/libtpch_extension.a)
 target_include_directories(duckdb_tpch INTERFACE ${DUCKDB_SOURCE_DIR}/extension/tpch/include)
 
+# quack — out-of-tree, built by the duckdb ExternalProject (see DUCKDB_EXTENSIONS).
+# Loaded by name via the generated extension loader, so no include dir is needed.
+add_library(duckdb_quack STATIC IMPORTED)
+set_property(TARGET duckdb_quack PROPERTY IMPORTED_LOCATION ${install_dir}/lib/libquack_extension.a)
+
 add_dependencies(duckdb duckdb_ep)
 add_dependencies(duckdb_parquet duckdb_ep)
 add_dependencies(duckdb_json duckdb_ep)
 add_dependencies(duckdb_icu duckdb_ep)
 add_dependencies(duckdb_tpcds duckdb_ep)
 add_dependencies(duckdb_tpch duckdb_ep)
+add_dependencies(duckdb_quack duckdb_ep)

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@duckdb/node-api": "1.5.2-r.1",
+    "@duckdb/node-api": "1.5.4-r.1",
     "@run-trace/duckdb-wasm": "file:../packages/duckdb-wasm"
   }
 }

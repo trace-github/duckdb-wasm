@@ -45,6 +45,18 @@ echo "=== Building WASM targets (EH + COI with emsdk 4.0.3) ==="
 /src/scripts/wasm_build_lib.sh relperf eh
 /src/scripts/wasm_build_lib.sh relperf coi
 
+# Emscripten 4.0.3 emits no standalone pthread worker (duckdb_wasm.worker.js), so
+# wasm_build_lib.sh's duckdb-coi.pthread.js generation is skipped — yet bundle.mjs
+# requires that file (it's the Emscripten pthread bootstrap the COI worker reuses).
+# Restore it from the tracked template if the build didn't produce one, so the
+# build is self-contained and a `clean` can't silently break COI bundling.
+# Regenerate lib/duckdb-coi.pthread.template.js when bumping the Emscripten version.
+PTHREAD_BINDING=/src/packages/duckdb-wasm/src/bindings/duckdb-coi.pthread.js
+if [ ! -s "$PTHREAD_BINDING" ]; then
+    echo "=== Restoring duckdb-coi.pthread.js from template (Emscripten emitted no worker) ==="
+    cp /src/lib/duckdb-coi.pthread.template.js "$PTHREAD_BINDING"
+fi
+
 echo "=== Building JS/TS package ==="
 # Use yarn to respect the lockfile (pins @types/emscripten to 1.39.10)
 cd /src

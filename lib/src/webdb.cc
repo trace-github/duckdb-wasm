@@ -60,6 +60,7 @@
 #include "duckdb/web/extensions/hash_ext_extension.h"
 #include "duckdb/web/extensions/lua_extension.h"
 #include "duckdb/web/extensions/fts_extension.h"
+#include "duckdb/web/extensions/quack_extension.h"
 #include "duckdb/web/functions/table_function_relation.h"
 #include "duckdb/web/http_wasm.h"
 #include "duckdb/web/io/arrow_ifstream.h"
@@ -1011,6 +1012,7 @@ arrow::Status WebDB::Open(std::string_view args_json) {
         duckdb_web_hash_ext_init(db.get());
         duckdb_web_lua_init(db.get());
         duckdb_web_fts_init(db.get());
+        duckdb_web_quack_init(db.get());
 #endif  // WASM_LOADABLE_EXTENSIONS
         RegisterCustomExtensionOptions(db);
 

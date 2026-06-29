@@ -307,10 +307,17 @@ else()
   target_include_directories(duckdb_web_fts PRIVATE
     ${CMAKE_SOURCE_DIR}/../submodules/duckdb_fts/extension/fts/include)
 
+  # quack (client-server protocol) — out-of-tree, compiled by the duckdb
+  # ExternalProject into libquack_extension.a (imported as duckdb_quack).
+  add_library(
+    duckdb_web_quack
+    ${CMAKE_SOURCE_DIR}/src/extensions/quack_extension.cc)
+  target_include_directories(duckdb_web_quack PRIVATE ${DUCKDB_INCLUDE_DIR})
+
   # Always link JSON extension (upstream conditionally checks a cache file)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DDUCKDB_JSON_EXTENSION")
 
-  target_link_libraries(duckdb_web duckdb duckdb_web_parquet duckdb_web_json duckdb_web_icu duckdb_web_tpcds duckdb_web_tpch duckdb_web_hash_ext duckdb_web_lua duckdb_web_fts arrow rapidjson ${THREAD_LIBS})
+  target_link_libraries(duckdb_web duckdb duckdb_web_parquet duckdb_web_json duckdb_web_icu duckdb_web_tpcds duckdb_web_tpch duckdb_web_hash_ext duckdb_web_lua duckdb_web_fts duckdb_web_quack arrow rapidjson ${THREAD_LIBS})
   target_link_libraries(duckdb_web_parquet duckdb duckdb_parquet)
   target_link_libraries(duckdb_web_json duckdb duckdb_json)
   target_link_libraries(duckdb_web_icu duckdb duckdb_icu)
@@ -318,6 +325,7 @@ else()
   target_link_libraries(duckdb_web_tpch duckdb duckdb_tpch)
   target_link_libraries(duckdb_web_lua duckdb lua_c_lib)
   target_link_libraries(duckdb_web_fts duckdb snowball_stemmer)
+  target_link_libraries(duckdb_web_quack duckdb duckdb_quack)
 endif()
 
 # ---------------------------------------------------------------------------

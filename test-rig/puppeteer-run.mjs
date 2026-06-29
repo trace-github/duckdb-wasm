@@ -50,6 +50,7 @@ for (let i = 0; i < args.length; i++) {
     case '--wasmfs':        page = '/wasmfs-test.html'; break;
     case '--thread-file-stress': page = '/thread-file-stress-test.html'; break;
     case '--durability':    page = '/durability-test.html'; break;
+    case '--opfs-nested':   page = '/opfs-nested-test.html'; break;
     default:
       console.error(`Unknown option: ${args[i]}`);
       process.exit(1);
@@ -137,6 +138,7 @@ async function main() {
   console.log('Server is ready.');
 
   let exitCode = 0;
+  let pageErrored = false;
 
   // Track server exit
   let serverExited = false;
@@ -209,9 +211,12 @@ async function main() {
       console.log(`[${prefix}] ${text}`);
     });
 
-    // Capture page errors
+    // Capture page errors. Any uncaught page error fails the run — a passing
+    // /report can otherwise mask an async error (e.g. a COI pthread worker
+    // "Module is not defined" that fires after the PASS report was already sent).
     browserPage.on('pageerror', (err) => {
       console.error(`[BROWSER:PAGEERROR] ${err.message}`);
+      pageErrored = true;
     });
 
     // Navigate to the test page
@@ -276,6 +281,12 @@ async function main() {
     if (!serverExited) {
       serverProc.kill('SIGTERM');
     }
+  }
+
+  // A passing report must not mask an uncaught page error.
+  if (pageErrored && exitCode === 0) {
+    console.error('FAIL: uncaught page error(s) occurred during the run (see [BROWSER:PAGEERROR] above) — failing despite the reported status.');
+    exitCode = 3;
   }
 
   process.exit(exitCode);

@@ -66,8 +66,10 @@ build_native osx_arm64
 build_native osx_amd64
 
 # Linux targets — Docker with native toolchains
-build_in_docker linux_arm64 duckdb-wasm-builder
 build_in_docker linux_amd64 duckdb-wasm-builder:amd64
+
+# excluding linux_arm64. requires heavily emulated system to build, often OOMs, and we dont use it anywhere
+#build_in_docker linux_arm64 duckdb-wasm-builder
 
 echo ""
 echo "=============================="

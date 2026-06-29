@@ -31,6 +31,10 @@ const server = createServer(async (req, res) => {
   res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Access-Control-Allow-Origin', '*');
+  // Never cache: tests must always load the freshly-built dist (a stale cached
+  // worker, e.g. an old broken duckdb-coi.pthread.worker.js, can make a fixed
+  // build still appear broken).
+  res.setHeader('Cache-Control', 'no-store');
 
   // Log all requests except heartbeat pings
   if (req.url !== '/ping.html') {

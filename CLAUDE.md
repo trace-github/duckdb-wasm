@@ -18,6 +18,9 @@ json, parquet, icu, tpcds, tpch, fts, hash_ext (custom Rust), lua
 
 ## Key rules
 
+- **Never commit, push, publish, or create branches unless the user explicitly asks** — make changes in the working tree only. Do not run `git commit`, `git push`, `git branch`/`git checkout -b`, `npm publish`, `trace-scripts/publish.sh`, or `trace-scripts/push-extensions.sh` on your own initiative. Each requires an explicit request for that specific action.
+  - A **conditional** pre-authorization ("publish if the tests pass") is NOT a green light to publish autonomously. `npm publish` and GCS pushes are irreversible/outward — report the result and get a fresh, explicit "publish now" immediately before doing it. Never treat an earlier "if it works" as a standing approval.
+  - "Tests pass" only counts as a **complete** `run-tests.sh` run with prerequisites built (native extension via `build-all.sh` — see Testing) on the relevant machine. A single local green run is not a robust pass; surface caveats (machine-dependent timeouts, prerequisites) rather than concluding "everything works."
 - **Minimal upstream source changes** — `packages/duckdb-wasm/src/` changes are limited to removing MVP support (`platform.ts`, blocking targets, node base bindings). `wasm_build_lib.sh` and `arrow.cmake` are untouched.
 - **Post-build bundle patches** — `dist/` files are patched after every WASM build (called automatically by `build-wasm.sh`). These are NOT source modifications — `dist/` is not tracked in git.
   - `trace-scripts/patch-node-bundle.mjs` — patches `dist/duckdb-node.cjs` to export `NodeWorker` and guard the worker bootstrap so DuckDB works in Node.js worker threads. Uses regex patterns (not minified variable names) for robustness.
@@ -41,6 +44,12 @@ json, parquet, icu, tpcds, tpch, fts, hash_ext (custom Rust), lua
 - Node WASM main thread: `test-node/wasm-smoke-test.mjs`
 - Node WASM worker thread: `test-node/wasm-worker-test.mjs`
 - Node native extension: `test-node/smoke-test.mjs`
+
+**Prerequisite — `run-tests.sh` does NOT build the native extension.** The "Node.js hash_ext native smoke test" (`test-node/smoke-test.mjs`) requires `extension-dist/` to already exist; if it's absent the suite fails with "extension-dist/ not found", and `run-tests.sh` neither builds it nor skips it. So a full pass requires `./extensions/hash_ext/build-all.sh` (4-platform Rust cross-compile) to have run first. `build-wasm.sh` + `run-tests.sh` alone will always fail that suite. (This is a native-artifact prerequisite only — it does not affect the published WASM package, which doesn't use the native builds.)
+
+**Timeout caveat.** The browser "Rust hash extension" suite (`--hash-ext`) runs 10M-row perf steps under a hardcoded `--timeout 120000`. On slower hardware it can exceed 120s and report a FAIL even though every assertion passes — check the suite log for a timeout vs. an actual assertion failure before treating it as broken.
+
+**Don't trust the `Status: PASS` / suite summary alone — scan the FULL page output for errors.** A suite can report PASS while a real page/worker error is logged. In particular an async error in the COI pthread worker (e.g. `Uncaught ReferenceError: Module is not defined` at `dist/duckdb-browser-coi.pthread.worker.js`) can fire *after* the page already sent its PASS report, so the FAIL report is swallowed (`_reported` is already true) and the rig still prints PASS. Before declaring any run clean, grep the captured output for: `[BROWSER:PAGEERROR]`, `[BROWSER:ERROR]`, `Global error:`, `Module is not defined`, `ReferenceError`, `worker sent an error`. Capture the whole run (not just `tail`) — reading only the summary will miss these. Note many suites use `maximumThreads: 1` and never spawn the pthread worker, so they pass even if it's broken; verify the COI pthread worker with a genuinely multi-threaded suite (`--db-stress`, `--file-stress`, `--thread-file-stress`, `--wasmfs`).
 
 ## OPFS browser worker patch
 

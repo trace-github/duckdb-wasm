@@ -11,6 +11,15 @@ Upgrade the fork to a new upstream duckdb-wasm release while preserving our bund
 
 We only add extensions and apply one post-build patch to the Node.js bundle. The duckdb-wasm package TypeScript/JavaScript source must be identical to upstream — only `package.json` (name/version) and the built `dist/duckdb-node.cjs` (patched post-build) differ. If you're changing upstream TS/JS source files, you're doing it wrong.
 
+## Investigation discipline (learned the hard way)
+
+Don't conclude "impossible / unsupported / can't reach that version" without verifying against fresh data and a real build:
+
+- **`git fetch upstream` BEFORE checking upstream state.** `git log upstream/main` / `git show upstream/...` without fetching is stale — it has led to wrong "the fork can't reach duckdb vX" conclusions when upstream was already there.
+- **Read the actual source (`.cpp`/`.hpp`), not just `CMakeLists.txt`/CI**, before declaring a feature unsupported. An extension's wasm support can live in an `#ifdef __EMSCRIPTEN__` in its `.cpp` while its CMake/CI show nothing (this is exactly how `quack`'s wasm-client support is gated).
+- **Verify by building, not by inference** — and note a stale build cache reports the OLD duckdb version after a submodule bump (see the `clean-duckdb-wasm` skill).
+- **Prebuilt artifacts are ground truth:** `curl -sI http://extensions.duckdb.org/v<VER>/wasm_eh/<EXT>.duckdb_extension.wasm` returning 200 proves an extension already builds for wasm.
+
 ## Red Flags — STOP and Rethink
 
 - Modifying `packages/duckdb-wasm/src/` files (bindings, runtime, workers)
@@ -146,6 +155,13 @@ Read each file before modifying. Compare with the previous version to understand
 **`.gitmodules`:**
 - Add duckdb_lua, lua, duckdb_fts submodules
 
+**Adding an out-of-tree extension (how `quack` was added):**
+- Add its name to `DUCKDB_EXTENSIONS` in `lib/cmake/duckdb.cmake`. If duckdb ships `.github/config/extensions/<name>.cmake`, duckdb's `extension/extension_build_tools.cmake` auto-includes it (clones the pinned `GIT_URL`/`GIT_TAG`) — no custom config file needed. Note `extension_config_wasm.cmake` is effectively **vestigial** for the lib build (the duckdb ExternalProject builds from `DUCKDB_EXTENSIONS`, not that file).
+- Add `<INSTALL_DIR>/lib/lib<name>_extension.a` to `BUILD_BYPRODUCTS` + an imported target (`duckdb_<name>`) + `add_dependencies(duckdb_<name> duckdb_ep)`.
+- Glue `lib/src/extensions/<name>_extension.cc`: `db->LoadStaticExtension<duckdb::<Name>Extension>()` + header + a `duckdb_web_<name>` lib linked into `duckdb_web` + an init call in `webdb.cc`. **The generated loader only registers `core_functions`** — `ExtensionHelper::LoadExtension(db, "name")` by name silently no-ops, so the explicit `LoadStaticExtension<Class>` glue is mandatory (same pattern as the others).
+- If the extension's header only exists in a build-time clone, mirror its class declaration inline in the glue (pinned to the `GIT_TAG`) instead of wiring the clone's include path.
+- An extension may be client-only on wasm (e.g. `quack`: `quack_serve` is `#ifdef __EMSCRIPTEN__`-disabled). duckdb-wasm HTTP uses synchronous XHR — it works in the browser; **Node has no HTTP** (`runtime_node.ts` → "Unsupported data protocol") and needs a sync-XHR shim (see `test-node/sync-xhr-node.cjs`).
+
 ### Step 7: Add submodules
 
 ```bash
@@ -225,6 +241,17 @@ The wasm_build_lib.sh post-processing (sed/awk on js-beautify output) didn't mat
 **`patch-node-bundle.mjs: ERROR: Patch N anchor not found`**
 The bundle structure changed in this upstream version. Open `packages/duckdb-wasm/dist/duckdb-node.cjs` and search for the new location of the anchor. Update the patch script anchor strings.
 
+**Bundle reports the OLD duckdb version, or a newly-added extension is missing**
+Stale build cache — the duckdb ExternalProject wasn't rebuilt after the submodule bump. Run `clean.sh` (removes `build/`) and rebuild. See `clean-duckdb-wasm`.
+
+**`bundle.mjs` can't read `duckdb-coi.pthread.js`, or COI bundle throws "Module is not defined"**
+Emscripten 4.0.3 emits no standalone pthread worker, so the file is restored from the tracked template `lib/duckdb-coi.pthread.template.js` by `docker-build.sh`. If you bump the Emscripten version, regenerate that template (extract `sourcesContent` for `duckdb-coi.pthread.js` from a published `*.pthread.worker.js.map`). Never `cp duckdb-coi.js`. See `clean-duckdb-wasm`.
+
+**Native extension fails to load after a duckdb bump** ("built for version X, can only load with that version")
+The native `hash_ext` is version-locked to duckdb. Rebuild with `./extensions/hash_ext/build-all.sh` — it builds `osx_arm64`, `osx_amd64`, `linux_amd64`. The npm wasm package doesn't use native builds; the macOS native smoke test uses the `osx_arm64` artifact.
+
+> **`linux_arm64` is intentionally disabled in `build-all.sh` (commented out) — don't re-enable it expecting a real arm64 binary.** Its old "may OOM under Docker (`cc1plus` killed) — retryable" reputation was a symptom of an image-tag conflict, not a flaky compile: `build-all.sh` ran that target with the `duckdb-wasm-builder` (`:latest`) image expecting **arm64**, but `build-wasm.sh` builds `:latest` as **amd64** (`--platform linux/amd64`, emsdk has no arm64 binary). So it actually ran an emulated amd64 build under QEMU (heavy → the OOM) and at best re-emitted `linux_amd64` — a genuine arm64 ext was never produced. A real one would need a separate Emscripten-free arm64 builder image the repo doesn't provide; we don't ship the native ext to ARM64 Linux, so it's disabled. Full root cause in `clean-duckdb-wasm`.
+
 ## Bundled Extensions Reference
 
 | Extension | Type | Source | CMake Target |
@@ -248,3 +275,8 @@ All of these must pass before the upgrade is complete:
 - **Node.js WASM smoke** — DuckDB loads in Node via NodeWorker, queries work, extensions respond
 - **Node.js WASM worker thread** — DuckDB works when imported from an application worker thread; global not mutated; NodeWorker exported
 - **Node.js native extension** — hash_ext loads via `@duckdb/node-api`, known hash values match
+
+## Related skills
+
+- `clean-duckdb-wasm` — clean.sh vs --all, the build-cache staleness trap, submodule reset (`reset --hard`, not just checkout+clean), and the `duckdb-coi.pthread.js` restore a clean depends on.
+- `commit-and-publish-duckdb-wasm` — reset submodules before committing, npm publish, GCS native-extension push.
