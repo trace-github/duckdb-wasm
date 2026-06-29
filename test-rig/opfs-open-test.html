@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script><title>DuckDB-WASM OPFS Open + COPY Test</title></head>
+<body>
+<pre id="output">Starting OPFS open test...</pre>
+<script>
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+
+setTimeout(function() {
+  addLog('error', 'SAFETY TIMEOUT: no report after 90s');
+  sendReport('FAIL', { error: 'Safety timeout - test hung', elapsed: 90000 });
+}, 90000);
+</script>
+<script type="module">
+
+async function cleanOPFS(prefix) {
+  const root = await navigator.storage.getDirectory();
+  for await (const [name] of root.entries()) {
+    if (name.startsWith(prefix)) {
+      try { await root.removeEntry(name); } catch (e) { /* locked */ }
+    }
+  }
+}
+
+async function listOPFS(prefix) {
+  const entries = [];
+  const root = await navigator.storage.getDirectory();
+  for await (const [name, handle] of root.entries()) {
+    if (!prefix || name.startsWith(prefix)) {
+      let size = '?';
+      if (handle.kind === 'file') {
+        try { const f = await handle.getFile(); size = f.size; } catch (e) { size = 'locked'; }
+      }
+      entries.push(name + ' (' + size + 'B)');
+    }
+  }
+  return entries;
+}
+
+async function run() {
+  const t0 = Date.now();
+  const PREFIX = 'opfs_open_test_';
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    if (!crossOriginIsolated) {
+      throw new Error('This test requires COI mode');
+    }
+
+    // Clean stale files
+    await cleanOPFS(PREFIX);
+
+    const mod = await import('/dist/duckdb-browser.mjs');
+    const { AsyncDuckDB, selectBundle, ConsoleLogger, createWorker } = mod;
+    const logger = new ConsoleLogger();
+
+    const DUCKDB_BUNDLES = {
+      eh: {
+        mainModule: new URL('/dist/duckdb-eh.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-eh.worker.js', window.location.href).href,
+      },
+      coi: {
+        mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+        pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+      },
+    };
+
+    const bundle = await selectBundle(DUCKDB_BUNDLES);
+    const bundleName = bundle.mainModule.match(/duckdb-(\w+)\.wasm/)[1];
+    addLog('info', 'Selected bundle: ' + bundleName);
+
+    // ================================================================
+    // TEST 1: Open a new OPFS database (file doesn't exist yet)
+    // ================================================================
+    addLog('info', '=== Test 1: Open new OPFS database ===');
+    const dbName = PREFIX + Date.now() + '.db';
+
+    const worker1 = await createWorker(bundle.mainWorker);
+    const db1 = new AsyncDuckDB(logger, worker1);
+    await db1.instantiate(bundle.mainModule, bundle.pthreadWorker);
+
+    // Log all entries in _preparedHandles before and after open
+    addLog('info', 'Before open - _preparedHandles keys: ' + JSON.stringify(Object.keys(globalThis.DUCKDB_RUNTIME?._preparedHandles || {})));
+    addLog('info', 'Before open - _files keys: ' + JSON.stringify([...(globalThis.DUCKDB_RUNTIME?._files?.keys?.() || [])]));
+
+    await db1.open({
+      path: 'opfs://' + dbName,
+      accessMode: 3,
+      maximumThreads: 1,
+    });
+
+    addLog('info', 'After open - _preparedHandles keys: ' + JSON.stringify(Object.keys(globalThis.DUCKDB_RUNTIME?._preparedHandles || {})));
+    addLog('info', 'After open - _files keys: ' + JSON.stringify([...(globalThis.DUCKDB_RUNTIME?._files?.keys?.() || [])]));
+    addLog('info', 'Database opened at opfs://' + dbName);
+
+    const conn1 = await db1.connect();
+
+    // Verify we can create a table and insert data
+    await conn1.query("CREATE TABLE test_data (id INTEGER, name VARCHAR, score DOUBLE)");
+    await conn1.query("INSERT INTO test_data SELECT i, 'item_' || i::VARCHAR, i * 1.5 FROM generate_series(1, 1000) t(i)");
+    const countResult = await conn1.query("SELECT count(*)::INTEGER AS n FROM test_data");
+    const count = Number(countResult.get(0).n);
+    if (count !== 1000) throw new Error('Test 1: Expected 1000 rows, got ' + count);
+    addLog('info', 'Test 1 PASS: Created table with 1000 rows in OPFS database');
+    _results.push({ label: 'opfs_db_open', value: 'PASS' });
+
+    // ================================================================
+    // TEST 2: COPY TO opfs:// WITHOUT auto file handling (should fail)
+    // ================================================================
+    addLog('info', '=== Test 2: COPY TO opfs:// without auto handling ===');
+    const parquetName = PREFIX + 'output_' + Date.now() + '.parquet';
+    let copyFailed = false;
+    try {
+      await conn1.query("COPY (SELECT * FROM test_data) TO 'opfs://" + parquetName + "' (FORMAT PARQUET)");
+    } catch (e) {
+      copyFailed = true;
+      addLog('info', 'Test 2: COPY TO failed as expected without auto handling: ' + e.message);
+    }
+    if (!copyFailed) {
+      // It might succeed if the runtime handles it - let's check
+      addLog('info', 'Test 2: COPY TO unexpectedly succeeded without auto handling');
+    }
+    _results.push({ label: 'copy_without_auto', value: copyFailed ? 'Failed as expected' : 'Succeeded (unexpected)' });
+
+    await conn1.close();
+    await db1.terminate();
+
+    // ================================================================
+    // TEST 3: COPY TO opfs:// WITH opfs.fileHandling = "auto"
+    // ================================================================
+    addLog('info', '=== Test 3: COPY TO opfs:// with auto file handling ===');
+
+    const worker2 = await createWorker(bundle.mainWorker);
+    const db2 = new AsyncDuckDB(logger, worker2);
+    await db2.instantiate(bundle.mainModule, bundle.pthreadWorker);
+
+    await db2.open({
+      path: 'opfs://' + dbName,
+      accessMode: 3,
+      maximumThreads: 1,
+      opfs: { fileHandling: 'auto' },
+    });
+    addLog('info', 'Database reopened with opfs.fileHandling=auto');
+
+    const conn2 = await db2.connect();
+
+    // Verify data is still there from Test 1
+    const recount = await conn2.query("SELECT count(*)::INTEGER AS n FROM test_data");
+    const recountVal = Number(recount.get(0).n);
+    addLog('info', 'Row count after reopen: ' + recountVal);
+    if (recountVal !== 1000) throw new Error('Test 3: Expected 1000 rows after reopen, got ' + recountVal);
+
+    // Now try COPY TO opfs:// with auto handling
+    const parquetName2 = PREFIX + 'auto_' + Date.now() + '.parquet';
+    await conn2.query("COPY (SELECT * FROM test_data) TO 'opfs://" + parquetName2 + "' (FORMAT PARQUET)");
+    addLog('info', 'Test 3: COPY TO opfs://' + parquetName2 + ' succeeded with auto handling');
+
+    // Verify we can read the parquet file back
+    const readResult = await conn2.query("SELECT count(*)::INTEGER AS n FROM read_parquet('opfs://" + parquetName2 + "')");
+    const readCount = Number(readResult.get(0).n);
+    if (readCount !== 1000) throw new Error('Test 3: Expected 1000 rows from parquet, got ' + readCount);
+    addLog('info', 'Test 3 PASS: Read back ' + readCount + ' rows from OPFS parquet');
+    _results.push({ label: 'copy_with_auto', value: 'PASS (' + readCount + ' rows)' });
+
+    // ================================================================
+    // TEST 4: COPY TO opfs:// with manual file registration
+    // ================================================================
+    addLog('info', '=== Test 4: COPY TO opfs:// with manual registration ===');
+
+    // Close and reopen WITHOUT auto handling
+    await conn2.close();
+    await db2.terminate();
+
+    const worker3 = await createWorker(bundle.mainWorker);
+    const db3 = new AsyncDuckDB(logger, worker3);
+    await db3.instantiate(bundle.mainModule, bundle.pthreadWorker);
+
+    await db3.open({
+      path: 'opfs://' + dbName,
+      accessMode: 3,
+      maximumThreads: 1,
+      // No opfs config - manual mode
+    });
+    addLog('info', 'Database reopened without auto handling');
+
+    const conn3 = await db3.connect();
+
+    // Manually register the OPFS file before COPY
+    const parquetName3 = PREFIX + 'manual_' + Date.now() + '.parquet';
+    await db3.registerOPFSFileName('opfs://' + parquetName3);
+    addLog('info', 'Manually registered opfs://' + parquetName3);
+
+    await conn3.query("COPY (SELECT * FROM test_data) TO 'opfs://" + parquetName3 + "' (FORMAT PARQUET)");
+    addLog('info', 'COPY TO succeeded with manual registration');
+
+    // Read back
+    await db3.registerOPFSFileName('opfs://' + parquetName3);
+    const readResult3 = await conn3.query("SELECT count(*)::INTEGER AS n FROM read_parquet('opfs://" + parquetName3 + "')");
+    const readCount3 = Number(readResult3.get(0).n);
+    if (readCount3 !== 1000) throw new Error('Test 4: Expected 1000 rows from parquet, got ' + readCount3);
+    addLog('info', 'Test 4 PASS: Manual registration works (' + readCount3 + ' rows)');
+    _results.push({ label: 'copy_with_manual_reg', value: 'PASS (' + readCount3 + ' rows)' });
+
+    // ================================================================
+    // TEST 5: COPY TO with ZSTD compression (user's exact failing case)
+    // ================================================================
+    addLog('info', '=== Test 5: COPY TO with ZSTD compression ===');
+
+    const parquetName4 = PREFIX + 'zstd_' + Date.now() + '.parquet';
+    await db3.registerOPFSFileName('opfs://' + parquetName4);
+    await conn3.query(
+      "COPY (SELECT * FROM test_data) TO 'opfs://" + parquetName4 +
+      "' (FORMAT PARQUET, COMPRESSION zstd, COMPRESSION_LEVEL 1)"
+    );
+    addLog('info', 'COPY TO with ZSTD succeeded');
+
+    await db3.registerOPFSFileName('opfs://' + parquetName4);
+    const readResult4 = await conn3.query("SELECT count(*)::INTEGER AS n FROM read_parquet('opfs://" + parquetName4 + "')");
+    const readCount4 = Number(readResult4.get(0).n);
+    if (readCount4 !== 1000) throw new Error('Test 5: Expected 1000 rows, got ' + readCount4);
+    addLog('info', 'Test 5 PASS: ZSTD parquet verified (' + readCount4 + ' rows)');
+    _results.push({ label: 'copy_zstd', value: 'PASS' });
+
+    // ================================================================
+    // TEST 6: Verify OPFS files exist on disk
+    // ================================================================
+    addLog('info', '=== Test 6: Verify OPFS files exist ===');
+    const opfsFiles = await listOPFS(PREFIX);
+    addLog('info', 'OPFS files: ' + opfsFiles.join(', '));
+    _results.push({ label: 'opfs_files', value: opfsFiles.length + ' files' });
+
+    // Cleanup
+    await conn3.close();
+    await db3.terminate();
+    await cleanOPFS(PREFIX);
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'All OPFS open tests passed in ' + elapsed + 'ms');
+    sendReport('PASS', { elapsed, bundle: bundleName });
+
+  } catch (e) {
+    addLog('error', 'FAILED: ' + e.message);
+    addLog('error', e.stack);
+    sendReport('FAIL', { elapsed: Date.now() - t0, error: e.message, stack: e.stack });
+    await cleanOPFS(PREFIX);
+  }
+}
+
+run();
+</script>
+</body>
+</html>

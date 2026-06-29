@@ -1,7 +1,8 @@
 import { DuckDBModule } from './duckdb_module';
 import { DuckDBBindingsBase } from './bindings_base';
 import { DuckDBRuntime } from './runtime';
-import { Logger, LogLevel, LogTopic, LogOrigin, LogEvent } from '../log';
+import { LogLevel, LogTopic, LogOrigin, LogEvent } from '../log';
+import { Logger } from '../log';
 import { InstantiationProgress } from '.';
 
 /** DuckDB bindings for the browser */
@@ -37,7 +38,7 @@ export abstract class DuckDBBrowserBindings extends DuckDBBindingsBase {
         // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
         imports: any,
         success: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void,
-    ): WebAssembly.Exports {
+    ): Emscripten.WebAssemblyExports {
         // We rely on the following here:
         //
         // ...when a Request object is created using the Request.Request constructor,
@@ -164,7 +165,7 @@ export abstract class DuckDBBrowserBindings extends DuckDBBindingsBase {
             };
             run();
         }
-        return {};
+        return [];
     }
 
     /// Instantiation must be done by the browser variants

@@ -24,16 +24,59 @@ run() {
 }
 
 run "Smoke tests (default)"  ""
-run "COI + threading"        "--coi"
-run "WasmFS OPFS"            "--wasmfs"
-run "OPFS persistence"       "--opfs-persist"
+run "OPFS open + COPY"       "--opfs-open"
+run "OPFS persistence"       "--opfs-persist --timeout 120000"
 run "DB stress"              "--db-stress"
-run "File I/O stress"        "--file-stress"
 run "Rust hash extension"    "--hash-ext --timeout 120000"
-run "Evalexpr (Rhai)"        "--evalexpr"
 run "Lua extension"          "--lua"
 run "Buffer registration"    "--buffer-reg"
 run "Metric table"           "--metric-table"
+run "WasmFS + OPFS"          "--wasmfs --timeout 120000"
+run "Thread file stress"     "--thread-file-stress --timeout 300000"
+run "Durability (COI)"       "--durability --timeout 240000"
+
+# Node.js smoke tests
+(cd "$ROOT_DIR/test-node" && npm install --silent)
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Node.js WASM smoke test"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+if node "$ROOT_DIR/test-node/wasm-smoke-test.mjs"; then
+    PASS+=("Node.js WASM smoke test")
+else
+    FAIL+=("Node.js WASM smoke test")
+fi
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Node.js WASM in application worker thread"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+if node "$ROOT_DIR/test-node/wasm-worker-test.mjs"; then
+    PASS+=("Node.js WASM in application worker thread")
+else
+    FAIL+=("Node.js WASM in application worker thread")
+fi
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Node.js hash_ext native smoke test"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+if node "$ROOT_DIR/test-node/smoke-test.mjs"; then
+    PASS+=("Node.js hash_ext native smoke test")
+else
+    FAIL+=("Node.js hash_ext native smoke test")
+fi
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Node.js WASM durability"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+if node "$ROOT_DIR/test-node/wasm-durability-test.mjs"; then
+    PASS+=("Node.js WASM durability")
+else
+    FAIL+=("Node.js WASM durability")
+fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

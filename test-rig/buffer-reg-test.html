@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
-<head><title>DuckDB-WASM registerFileBuffer + OPFS Database Test</title></head>
+<head>
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script><title>DuckDB-WASM registerFileBuffer + OPFS Database Test</title></head>
 <body>
 <pre id="output">Starting registerFileBuffer + OPFS test...</pre>
 <script>
@@ -78,28 +79,38 @@ async function run() {
     await cleanOPFS('bufreg_');
 
     addLog('info', 'Importing module...');
-    const mod = await import('/dist/duckdb-wasm.mjs');
-    const { AsyncDuckDB, ConsoleLogger } = mod;
+    const mod = await import('/dist/duckdb-browser.mjs');
+    const { AsyncDuckDB, selectBundle, ConsoleLogger, createWorker } = mod;
 
-    const bundleConfig = {
-      mainModule: '/dist/duckdb-coi.wasm',
-      mainWorker: '/dist/duckdb-browser-coi.worker.js',
-      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    const DUCKDB_BUNDLES = {
+      eh: {
+        mainModule: new URL('/dist/duckdb-eh.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-eh.worker.js', window.location.href).href,
+      },
+      coi: {
+        mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+        pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+      },
     };
 
+    addLog('info', 'Selecting bundle...');
+    const bundle = await selectBundle(DUCKDB_BUNDLES);
+    const bundleName = bundle.mainModule.match(/duckdb-(\w+)\.wasm/)[1];
+    addLog('info', 'Selected bundle: ' + bundleName);
+
     const logger = new ConsoleLogger();
-    const worker = new Worker(bundleConfig.mainWorker);
-    worker.onerror = (e) => addLog('error', 'Worker error: ' + (e.message || e));
+    const worker = await createWorker(bundle.mainWorker);
     db = new AsyncDuckDB(logger, worker);
-    await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
-    addLog('info', 'COI bundle instantiated');
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    addLog('info', bundleName + ' bundle instantiated');
 
     // Open OPFS-backed database
     const dbName = PREFIX + 'main.db';
     await db.open({
       path: 'opfs://' + dbName,
       accessMode: 3,
-      maximumThreads: 5,
+      maximumThreads: 1,
     });
     addLog('info', 'Database opened on OPFS: ' + dbName);
 
@@ -117,10 +128,10 @@ async function run() {
     addLog('info', 'Registered test_data.csv (' + csvData.length + ' bytes)');
 
     const r1 = await conn.query("SELECT COUNT(*) AS cnt FROM read_csv_auto('test_data.csv')");
-    addLog('info', 'CSV row count query returned (' + r1.byteLength + 'B)');
+    addLog('info', 'CSV row count: ' + Number(r1.get(0).cnt));
 
     const r1sum = await conn.query("SELECT SUM(value) AS total FROM read_csv_auto('test_data.csv')");
-    addLog('info', 'CSV sum query returned (' + r1sum.byteLength + 'B)');
+    addLog('info', 'CSV sum: ' + Number(r1sum.get(0).total));
 
     // Create a table in the OPFS database from the buffer-registered CSV
     await conn.query("CREATE TABLE from_csv AS SELECT * FROM read_csv_auto('test_data.csv')");
@@ -145,10 +156,10 @@ async function run() {
     addLog('info', 'Registered external_data.parquet');
 
     const r2cnt = await conn.query("SELECT COUNT(*) AS cnt FROM 'external_data.parquet'");
-    addLog('info', 'Parquet row count query returned');
+    addLog('info', 'Parquet row count: ' + Number(r2cnt.get(0).cnt));
 
     const r2agg = await conn.query("SELECT MIN(id) AS mn, MAX(id) AS mx, AVG(score)::INT AS avg_score FROM 'external_data.parquet'");
-    addLog('info', 'Parquet aggregate query returned');
+    addLog('info', 'Parquet agg: min=' + Number(r2agg.get(0).mn) + ', max=' + Number(r2agg.get(0).mx));
 
     // Create table in OPFS db from the buffer-registered parquet
     await conn.query("CREATE TABLE from_parquet AS SELECT * FROM 'external_data.parquet'");
@@ -223,9 +234,7 @@ async function run() {
     // ---------------------------------------------------------------
     addLog('info', '--- Test 6: Checkpoint with buffer files present ---');
 
-    await conn.query("SET threads = 1");
     await conn.query("CHECKPOINT");
-    await conn.query("SET threads = 5");
     addLog('info', 'Checkpoint succeeded with buffer files registered');
 
     // Verify OPFS tables still queryable after checkpoint

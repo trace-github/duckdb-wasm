@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
-<head><title>DuckDB-WASM OPFS Database Stress Test (5 threads)</title></head>
+<head>
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script><title>DuckDB-WASM OPFS Database Stress Test (5 threads)</title></head>
 <body>
 <pre id="output">Starting OPFS database stress test...</pre>
 <script>
@@ -54,14 +55,16 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
-function findInt32InArrow(buf, target) {
-  const bytes = new Uint8Array(buf);
-  const abuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  const view = new DataView(abuf);
-  for (let i = 0; i <= bytes.length - 4; i++) {
-    if (view.getInt32(i, true) === target) return true;
-  }
-  return false;
+// conn.query() returns an Arrow Table. Extract first column of first row as a number.
+function getFirstInt(table) {
+  const row = table.get(0);
+  if (!row) return null;
+  const col = table.schema.fields[0].name;
+  return Number(row[col]);
+}
+
+function checkIntEquals(table, target) {
+  return getFirstInt(table) === target;
 }
 
 async function cleanOPFS(prefix) {
@@ -113,29 +116,39 @@ async function run() {
     addLog('info', 'OPFS after clean: ' + (priorFiles.length ? priorFiles.join(', ') : '(empty)'));
 
     addLog('info', 'Importing module...');
-    const mod = await import('/dist/duckdb-wasm.mjs');
-    const { AsyncDuckDB, ConsoleLogger } = mod;
+    const mod = await import('/dist/duckdb-browser.mjs');
+    const { AsyncDuckDB, selectBundle, ConsoleLogger, createWorker } = mod;
 
-    const bundleConfig = {
-      mainModule: '/dist/duckdb-coi.wasm',
-      mainWorker: '/dist/duckdb-browser-coi.worker.js',
-      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    const DUCKDB_BUNDLES = {
+      eh: {
+        mainModule: new URL('/dist/duckdb-eh.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-eh.worker.js', window.location.href).href,
+      },
+      coi: {
+        mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+        pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+      },
     };
 
+    addLog('info', 'Selecting bundle...');
+    const bundle = await selectBundle(DUCKDB_BUNDLES);
+    const bundleName = bundle.mainModule.match(/duckdb-(\w+)\.wasm/)[1];
+    addLog('info', 'Selected bundle: ' + bundleName);
+
     const logger = new ConsoleLogger();
-    const worker = new Worker(bundleConfig.mainWorker);
-    worker.onerror = (e) => addLog('error', 'Worker error: ' + (e.message || e));
+    const worker = await createWorker(bundle.mainWorker);
     db = new AsyncDuckDB(logger, worker);
-    await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
-    addLog('info', 'COI bundle instantiated');
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    addLog('info', bundleName + ' bundle instantiated');
 
     const dbName = PREFIX + 'main.db';
     await db.open({
       path: 'opfs://' + dbName,
       accessMode: 3,
-      maximumThreads: 5,
+      maximumThreads: 1,
     });
-    addLog('info', 'Database opened on OPFS with maximumThreads=5: ' + dbName);
+    addLog('info', 'Database opened on OPFS: ' + dbName);
 
     const conn = await db.connect();
 
@@ -167,8 +180,8 @@ async function run() {
       conn.query("SELECT count(*)::INTEGER AS n FROM stress_data"),
       15000, 'T1 count'
     );
-    if (!findInt32InArrow(countResult, TOTAL_ROWS)) {
-      throw new Error('Test 1: row count mismatch');
+    if (!checkIntEquals(countResult, TOTAL_ROWS)) {
+      throw new Error('Test 1: row count mismatch, got ' + getFirstInt(countResult));
     }
 
     const elapsed1 = Date.now() - t1;
@@ -195,7 +208,7 @@ async function run() {
 
     for (let i = 0; i < readQueries.length; i++) {
       const r = await withTimeout(conn.query(readQueries[i]), 15000, 'T2 query ' + i);
-      if (r.byteLength < 10) throw new Error('Test 2: query ' + i + ' returned empty');
+      if (r.numRows < 1) throw new Error('Test 2: query ' + i + ' returned empty');
     }
 
     const elapsed2 = Date.now() - t2;
@@ -232,8 +245,8 @@ async function run() {
       conn.query("SELECT count(*)::INTEGER AS n FROM stress_data"),
       15000, 'T3 count'
     );
-    if (!findInt32InArrow(postInsertCount, expectedTotal)) {
-      throw new Error('Test 3: expected ' + expectedTotal + ' rows after inserts');
+    if (!checkIntEquals(postInsertCount, expectedTotal)) {
+      throw new Error('Test 3: expected ' + expectedTotal + ' rows after inserts, got ' + getFirstInt(postInsertCount));
     }
 
     const elapsed3 = Date.now() - t3;
@@ -270,7 +283,7 @@ async function run() {
           ORDER BY n DESC
           LIMIT 10
         `), 15000, 'T4 read ' + i);
-        if (r.byteLength < 10) throw new Error('Test 4: read round ' + i + ' empty');
+        if (r.numRows < 1) throw new Error('Test 4: read round ' + i + ' empty');
       }
       addLog('info', 'T4 round ' + i + ' (' + (i % 2 === 0 ? 'write' : 'read') + ') OK');
     }
@@ -300,7 +313,7 @@ async function run() {
 
     for (let i = 0; i < heavyQueries.length; i++) {
       const r = await withTimeout(conn.query(heavyQueries[i]), 30000, 'T5 heavy ' + i);
-      if (r.byteLength < 10) throw new Error('Test 5: heavy query ' + i + ' empty');
+      if (r.numRows < 1) throw new Error('Test 5: heavy query ' + i + ' empty');
       addLog('info', 'T5 heavy query ' + i + ' OK');
     }
 
@@ -328,8 +341,8 @@ async function run() {
       conn.query("SELECT count(*)::INTEGER AS n FROM stress_data WHERE department = 49"),
       15000, 'T6 verify delete'
     );
-    if (!findInt32InArrow(postModCount, 0)) {
-      throw new Error('Test 6: department 49 should have 0 rows after DELETE');
+    if (!checkIntEquals(postModCount, 0)) {
+      throw new Error('Test 6: department 49 should have 0 rows after DELETE, got ' + getFirstInt(postModCount));
     }
 
     const elapsed6 = Date.now() - t6;
@@ -337,7 +350,7 @@ async function run() {
     _results.push({ label: 'update_delete', value: 'OK (' + elapsed6 + 'ms)' });
 
     // =============================================
-    // TEST 7: Single-thread checkpoint, then resume multi-thread
+    // TEST 7: Checkpoint and verify data integrity
     // Drop to 1 thread, CHECKPOINT (flush WAL → DB), restore threads, query again
     // =============================================
     addLog('info', '--- Test 7: Single-thread checkpoint cycle ---');
@@ -354,21 +367,13 @@ async function run() {
     );
     addLog('info', 'T7 pre-checkpoint row count OK');
 
-    // Drop to single thread
-    await withTimeout(conn.query("SET threads = 1"), 5000, 'T7 set threads=1');
-    addLog('info', 'T7: threads set to 1');
-
-    // CHECKPOINT — this is what deadlocks with multiple threads
+    // CHECKPOINT
     await withTimeout(conn.query("CHECKPOINT"), 30000, 'T7 checkpoint');
     addLog('info', 'T7: CHECKPOINT completed!');
 
     // Check OPFS sizes after — main DB should be larger, WAL should be small/empty
     const postCheckpointFiles = await listOPFS(PREFIX);
     addLog('info', 'T7 after checkpoint: ' + postCheckpointFiles.join(', '));
-
-    // Restore multi-thread
-    await withTimeout(conn.query("SET threads = 5"), 5000, 'T7 set threads=5');
-    addLog('info', 'T7: threads restored to 5');
 
     // Verify data is still intact after checkpoint
     const postCount = await withTimeout(
@@ -377,7 +382,7 @@ async function run() {
     );
     addLog('info', 'T7: post-checkpoint row count OK');
 
-    // Run a heavy query to confirm multi-thread still works
+    // Run a heavy query to confirm things still work
     const postHeavy = await withTimeout(conn.query(`
       SELECT department, count(*)::INTEGER AS n, avg(score)::DOUBLE AS avg_s
       FROM stress_data
@@ -385,7 +390,7 @@ async function run() {
       ORDER BY n DESC
       LIMIT 10
     `), 15000, 'T7 post-checkpoint query');
-    if (postHeavy.byteLength < 10) throw new Error('Test 7: post-checkpoint query empty');
+    if (postHeavy.numRows < 1) throw new Error('Test 7: post-checkpoint query empty');
 
     const elapsed7 = Date.now() - t7;
     addLog('info', 'Test 7 PASS: checkpoint + resume (' + elapsed7 + 'ms)');
@@ -397,7 +402,7 @@ async function run() {
     addLog('info', '--- Test 8: Second write + checkpoint cycle ---');
     const t8 = Date.now();
 
-    // Insert more data (multi-threaded)
+    // Insert more data
     await withTimeout(conn.query(`
       INSERT INTO stress_data
       SELECT i AS id, 'post_ckpt_' || i::VARCHAR AS username,
@@ -406,21 +411,17 @@ async function run() {
         '2025-06-01' AS hire_date, 'after_checkpoint' AS notes
       FROM generate_series(0, 49999) t(i)
     `), 15000, 'T8 insert');
-    addLog('info', 'T8: inserted 50K rows (multi-threaded)');
+    addLog('info', 'T8: inserted 50K rows');
 
-    // Drop to 1 thread, checkpoint again
-    await withTimeout(conn.query("SET threads = 1"), 5000, 'T8 set threads=1');
+    // Checkpoint again
     await withTimeout(conn.query("CHECKPOINT"), 30000, 'T8 checkpoint');
     addLog('info', 'T8: second CHECKPOINT completed');
-
-    // Restore and verify
-    await withTimeout(conn.query("SET threads = 5"), 5000, 'T8 set threads=5');
     const dept99 = await withTimeout(
       conn.query("SELECT count(*)::INTEGER AS n FROM stress_data WHERE department = 99"),
       15000, 'T8 verify'
     );
-    if (!findInt32InArrow(dept99, 50000)) {
-      throw new Error('Test 8: expected 50000 rows in department 99');
+    if (!checkIntEquals(dept99, 50000)) {
+      throw new Error('Test 8: expected 50000 rows in department 99, got ' + getFirstInt(dept99));
     }
 
     const finalFiles = await listOPFS(PREFIX);

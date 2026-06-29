@@ -3,8 +3,12 @@
 # Produces: extension-dist/<version>/<platform>/hash_ext.duckdb_extension.gz
 #
 # Usage:
-#   ./extensions/hash_ext/build.sh            # Build for host platform
-#   ./extensions/hash_ext/build.sh --clean     # Clean and rebuild
+#   ./extensions/hash_ext/build.sh                       # Build for host platform
+#   ./extensions/hash_ext/build.sh --clean               # Clean and rebuild
+#   ./extensions/hash_ext/build.sh --platform osx_arm64  # Cross-compile for a specific platform
+#
+# Supported --platform values: osx_arm64, osx_amd64 (cross-compiled on macOS)
+# Linux builds: run this script without --platform inside a Docker container (see build-all.sh)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,8 +18,35 @@ RUST_DIR="$SCRIPT_DIR/rust"
 BUILD_DIR="$PROJECT_ROOT/build/extension-native"
 DIST_DIR="$PROJECT_ROOT/extension-dist"
 
+# ---------------------------------------------------------------------------
+# 0. Parse arguments
+# ---------------------------------------------------------------------------
+CROSS_PLATFORM=""
+CLEAN=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --clean)
+            CLEAN=1
+            shift
+            ;;
+        --platform)
+            CROSS_PLATFORM="${2:-}"
+            if [[ -z "$CROSS_PLATFORM" ]]; then
+                echo "ERROR: --platform requires an argument"
+                exit 1
+            fi
+            shift 2
+            ;;
+        *)
+            echo "Unknown argument: $1"
+            exit 1
+            ;;
+    esac
+done
+
 # Clean if requested
-if [[ "${1:-}" == "--clean" ]]; then
+if [[ "$CLEAN" == "1" ]]; then
     echo "=== Cleaning build artifacts ==="
     rm -rf "$BUILD_DIR"
     rm -rf "$RUST_DIR/target"
@@ -41,25 +72,58 @@ detect_platform() {
     echo "${os}_${arch}"
 }
 
-PLATFORM=$(detect_platform)
+RUST_TARGET=""
+CMAKE_EXTRA_FLAGS=""
+
+if [[ -n "$CROSS_PLATFORM" ]]; then
+    PLATFORM="$CROSS_PLATFORM"
+    case "$CROSS_PLATFORM" in
+        osx_arm64)
+            RUST_TARGET="aarch64-apple-darwin"
+            CMAKE_EXTRA_FLAGS=""
+            ;;
+        osx_amd64)
+            RUST_TARGET="x86_64-apple-darwin"
+            CMAKE_EXTRA_FLAGS="-DCMAKE_OSX_ARCHITECTURES=x86_64"
+            ;;
+        linux_amd64|linux_arm64)
+            # Linux targets are built natively inside Docker via build-all.sh.
+            # If running directly on Linux, no cross-compilation flags needed.
+            ;;
+        *)
+            echo "ERROR: Unknown platform '$CROSS_PLATFORM'. Supported: osx_arm64, osx_amd64, linux_amd64, linux_arm64"
+            exit 1
+            ;;
+    esac
+    # Use a platform-specific build directory to avoid conflicts
+    BUILD_DIR="$PROJECT_ROOT/build/extension-native-$PLATFORM"
+else
+    PLATFORM=$(detect_platform)
+fi
+
 echo "=== Building hash_ext for platform: $PLATFORM ==="
 
 # ---------------------------------------------------------------------------
 # 2. Get DuckDB version from submodule
 # ---------------------------------------------------------------------------
 DUCKDB_VERSION=$(cd "$DUCKDB_DIR" && git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-echo "=== DuckDB version: $DUCKDB_VERSION ==="
+DUCKDB_HASH=$(cd "$DUCKDB_DIR" && git log -1 --format=%h 2>/dev/null || echo "0000000000")
+echo "=== DuckDB version: $DUCKDB_VERSION (${DUCKDB_HASH}) ==="
 
 # ---------------------------------------------------------------------------
 # 3. Build Rust static library
 # ---------------------------------------------------------------------------
 echo "=== Building Rust static library ==="
-cd "$RUST_DIR"
-cargo build --release
-RUST_LIB="$RUST_DIR/target/release/libhash_ext.a"
-if [[ ! -f "$RUST_LIB" ]]; then
-    # Windows produces .lib
-    RUST_LIB="$RUST_DIR/target/release/hash_ext.lib"
+# Run cargo from workspace root; use build-dir-specific output to avoid
+# arch conflicts when the same repo is bind-mounted into Docker containers.
+cd "$PROJECT_ROOT"
+CARGO_OUT="$BUILD_DIR/cargo-target"
+if [[ -n "$RUST_TARGET" ]]; then
+    CARGO_TARGET_DIR="$CARGO_OUT" cargo build --target "$RUST_TARGET" --release -p hash_ext
+    RUST_LIB="$CARGO_OUT/$RUST_TARGET/release/libhash_ext.a"
+else
+    CARGO_TARGET_DIR="$CARGO_OUT" cargo build --release -p hash_ext
+    RUST_LIB="$CARGO_OUT/release/libhash_ext.a"
 fi
 echo "Rust lib: $RUST_LIB"
 
@@ -78,13 +142,9 @@ cmake "$DUCKDB_DIR" \
     -DEXTENSION_STATIC_BUILD=0 \
     -DHASH_EXT_RUST_LIB="$RUST_LIB" \
     -DDUCKDB_EXTENSION_CONFIGS="$SCRIPT_DIR/extension_config.cmake" \
-    -GNinja 2>/dev/null || \
-cmake "$DUCKDB_DIR" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_EXTENSIONS_ONLY=1 \
-    -DEXTENSION_STATIC_BUILD=0 \
-    -DHASH_EXT_RUST_LIB="$RUST_LIB" \
-    -DDUCKDB_EXTENSION_CONFIGS="$SCRIPT_DIR/extension_config.cmake"
+    -DGIT_COMMIT_HASH="$DUCKDB_HASH" \
+    -DOVERRIDE_GIT_DESCRIBE="$DUCKDB_VERSION-0-g$DUCKDB_HASH" \
+    ${CMAKE_EXTRA_FLAGS:+$CMAKE_EXTRA_FLAGS}
 
 echo "=== Building extension (using $NPROC cores) ==="
 cmake --build . --config Release -j "$NPROC"
@@ -106,6 +166,7 @@ DEST_DIR="$DIST_DIR/$DUCKDB_VERSION/$PLATFORM"
 mkdir -p "$DEST_DIR"
 
 echo "=== Packaging to $DEST_DIR ==="
+cp "$EXT_FILE" "$DEST_DIR/hash_ext.duckdb_extension"
 gzip -c "$EXT_FILE" > "$DEST_DIR/hash_ext.duckdb_extension.gz"
 
 echo ""

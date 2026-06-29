@@ -1,33 +1,177 @@
 # @run-trace/duckdb-wasm
 
-A custom build of [DuckDB-WASM](https://github.com/duckdb/duckdb-wasm), forked from [ridge-ai/duckdb-wasm](https://github.com/ridge-ai/duckdb-wasm), with modifications for multi-threaded browser use.
+Fork of [duckdb/duckdb-wasm](https://github.com/duckdb/duckdb-wasm) with statically linked extensions and a Node.js worker thread fix.
 
-**What's different from the standard DuckDB-WASM package:**
+For general DuckDB-Wasm documentation, see the [upstream README](https://github.com/duckdb/duckdb-wasm).
 
-- **WasmFS** — supports multiple threads reading files concurrently. Due to base package design around connections, we are still limited to one query at a time. I only see 20-30% improvement on large queries from parquet.
-- **Statically linked extensions** — JSON, parquet, and other extensions are linked directly into the WASM binary, fixing load failures when running with multiple threads
-- **Custom Rust extension** — a hashing extension for JSON values (example of how to write one).
-- **No apache-arrow dependency** — raw IPC buffers (`Uint8Array`) are returned as query results; bring your own Arrow library (e.g. [flechette](https://github.com/uwdata/flechette))
-- **Dockerfile to support building**
+## What we changed
 
-Published as [`@run-trace/duckdb-wasm`](https://www.npmjs.com/package/@run-trace/duckdb-wasm).
+### Bundled extensions
 
-## Build From Source
+Extensions are statically linked — no runtime installation or network fetch needed:
 
-```shell
-git clone https://github.com/trace-github/duckdb-wasm.git
-cd duckdb-wasm
-git submodule init
-git submodule update
-./trace-scripts/build-wasm.sh
+| Extension | Type |
+|-----------|------|
+| json | DuckDB built-in |
+| parquet | DuckDB built-in |
+| icu | DuckDB built-in |
+| tpcds | DuckDB built-in |
+| tpch | DuckDB built-in |
+| fts | External ([duckdb-fts](https://github.com/duckdb/duckdb-fts)) |
+| lua | External ([duckdb-lua](https://github.com/isaacbrodsky/duckdb-lua)) |
+| hash_ext | Custom Rust — `row_hash(col, ...)` stable 64-bit hashing |
+
+### Package rename
+
+Published as `@run-trace/duckdb-wasm` instead of `@duckdb/duckdb-wasm`. Zero TypeScript/JavaScript source changes.
+
+### Node.js worker thread fix
+
+The upstream bundle includes a web-worker polyfill that mutates `global.postMessage` when imported from a `worker_threads` worker with custom `workerData`. We apply a post-build patch to `dist/duckdb-node.cjs` that:
+
+1. Guards `He()` so it only runs when `workerData.mod` is a string (i.e., only for DuckDB's own internal workers, not application workers)
+2. Exports `NodeWorker` — the bundled Worker class — so you can use identical code in any Node.js context without the `web-worker` npm package
+
+The patch is applied automatically by `build-wasm.sh` via `trace-scripts/patch-node-bundle.mjs`. The `dist/` directory is not tracked in git.
+
+### OPFS path normalization fix (v1.5.2 regression)
+
+DuckDB v1.5.2 introduced a regression where the C++ side internally normalizes `opfs://file.db` to `opfs:/file.db` (single slash) and then opens the file a second time. The JS runtime's `inferDataProtocol("opfs:/...")` doesn't recognize the single-slash prefix and defaults to `BROWSER_FILEREADER` (read-only), causing "HTML FileReaders do not support writing" errors when writing to OPFS databases.
+
+We apply a post-build patch to `dist/duckdb-browser-*.worker.js` that:
+
+1. Registers OPFS files with the C++ filesystem under both `opfs://` and `opfs:/` path forms, so the second internal open finds the correct `BROWSER_FSACCESS` protocol
+2. Stores OPFS handles in JS runtime maps under both key forms
+3. Removes a `getSize()` check that prevented new (empty) database files from being registered
+4. Guards the COI worker's `postMessage` of OPFS handles to pthreads — `FileSystemSyncAccessHandle` is not cloneable, so the upstream code throws `DataCloneError` without this fix
+
+The patch is applied automatically by `build-wasm.sh` via `trace-scripts/patch-browser-workers.mjs`.
+
+**When to revert:** This patch can be removed when upstream duckdb-wasm fixes the path normalization in a future release. To test if it's still needed: skip the patch, rebuild, and run `node test-rig/puppeteer-run.mjs --opfs-open`. If the test passes without the patch, the upstream fix landed and you can remove the `patch-browser-workers.mjs` call from `build-wasm.sh`.
+
+## Installation
+
+```bash
+npm install @run-trace/duckdb-wasm
 ```
 
-Requires Docker Desktop (16 GiB memory recommended). See [CLAUDE.md](CLAUDE.md) for full build details.
+No additional dependencies needed for Node.js — the `web-worker` polyfill is bundled.
 
-## Repository Structure
+## Usage
 
-| Subproject | Description | Language |
-| --- | :--- | :--- |
-| [duckdb_wasm](/lib) | Wasm Library | C++ |
-| [@run-trace/duckdb-wasm](/packages/duckdb-wasm) | TypeScript API | TypeScript |
- yes, 
+### Browser
+
+Copy the WASM and worker files from `node_modules/@run-trace/duckdb-wasm/dist/` to your static assets directory, then:
+
+```js
+import * as duckdb from '@run-trace/duckdb-wasm';
+
+const BUNDLES = {
+  mvp: { mainModule: '/assets/duckdb-mvp.wasm',  mainWorker: '/assets/duckdb-browser-mvp.worker.js' },
+  eh:  { mainModule: '/assets/duckdb-eh.wasm',   mainWorker: '/assets/duckdb-browser-eh.worker.js' },
+};
+
+const bundle = await duckdb.selectBundle(BUNDLES);
+const worker = await duckdb.createWorker(bundle.mainWorker);
+const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
+await db.instantiate(bundle.mainModule);
+await db.open({});
+
+const conn = await db.connect();
+const result = await conn.query("SELECT row_hash('user1', 'hello') AS h");
+```
+
+### Node.js (main thread)
+
+```js
+import * as duckdb from '@run-trace/duckdb-wasm';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+
+// Resolve the dist/ directory inside the installed package
+const require = createRequire(import.meta.url);
+const DIST = dirname(require.resolve('@run-trace/duckdb-wasm/dist/duckdb-node.cjs'));
+
+const BUNDLES = {
+  mvp: { mainModule: join(DIST, 'duckdb-mvp.wasm'),  mainWorker: join(DIST, 'duckdb-node-mvp.worker.cjs') },
+  eh:  { mainModule: join(DIST, 'duckdb-eh.wasm'),   mainWorker: join(DIST, 'duckdb-node-eh.worker.cjs') },
+};
+
+const bundle = await duckdb.selectBundle(BUNDLES);
+const worker = new duckdb.NodeWorker(bundle.mainWorker);  // no web-worker package needed
+const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
+await db.instantiate(bundle.mainModule);
+await db.open({});
+
+const conn = await db.connect();
+const result = await conn.query("SELECT version() AS v");
+console.log(result.get(0).v);  // v1.5.2
+
+await conn.close();
+await db.terminate();
+worker.terminate();
+```
+
+### Node.js (worker thread)
+
+`NodeWorker` works identically inside a `worker_threads` worker — no adapter, no `web-worker` package, no global mutation:
+
+```js
+// app-worker.mjs — spawned with: new Worker('./app-worker.mjs', { workerData: { sessionId: '...' } })
+import * as duckdb from '@run-trace/duckdb-wasm';
+import { workerData, parentPort } from 'node:worker_threads';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+
+const require = createRequire(import.meta.url);
+const DIST = dirname(require.resolve('@run-trace/duckdb-wasm/dist/duckdb-node.cjs'));
+
+const BUNDLES = {
+  mvp: { mainModule: join(DIST, 'duckdb-mvp.wasm'),  mainWorker: join(DIST, 'duckdb-node-mvp.worker.cjs') },
+  eh:  { mainModule: join(DIST, 'duckdb-eh.wasm'),   mainWorker: join(DIST, 'duckdb-node-eh.worker.cjs') },
+};
+
+const bundle = await duckdb.selectBundle(BUNDLES);
+const worker = new duckdb.NodeWorker(bundle.mainWorker);  // same API as main thread
+const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
+await db.instantiate(bundle.mainModule);
+await db.open({});
+
+const conn = await db.connect();
+const result = await conn.query("SELECT row_hash('user1', 'hello') AS h");
+parentPort.postMessage({ hash: String(result.get(0).h) });
+
+// Your workerData is untouched — DuckDB's polyfill doesn't run in this context
+console.log(workerData.sessionId);
+
+await conn.close();
+await db.terminate();
+worker.terminate();
+```
+
+## Building
+
+Requires Docker (for WASM) and Rust (for native extensions).
+
+```bash
+./trace-scripts/build-wasm.sh          # WASM build (Docker) — patches duckdb-node.cjs automatically
+./extensions/hash_ext/build-all.sh     # Native hash_ext for all 4 platforms
+./trace-scripts/run-tests.sh           # All tests
+./trace-scripts/clean.sh --all         # Full clean
+```
+
+## Testing
+
+All suites must pass before publishing:
+
+- **Browser smoke** — DuckDB loads, version matches, JSON/Parquet work
+- **Browser hash-ext** — All hash function tests pass
+- **Browser lua** — All lua tests pass
+- **Node.js WASM smoke** — DuckDB loads via `NodeWorker`, queries and bundled extensions work
+- **Node.js WASM worker thread** — DuckDB works inside an application `worker_threads` worker; `global.postMessage` not mutated; `NodeWorker` exported and functional
+- **Node.js native extension** — `hash_ext` loads via `@duckdb/node-api`, known hash values match
+
+## Skills (for Claude Code)
+
+- **Upgrading DuckDB version**: `.claude/skills/upgrade-duckdb-wasm/`
+- **Committing and publishing**: `.claude/skills/commit-and-publish-duckdb-wasm/`

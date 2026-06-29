@@ -1,4 +1,5 @@
-import { SQLField } from '../sql_field';
+import * as arrow from 'apache-arrow';
+import { SQLField } from '../json_typedef';
 
 export enum JSONTableShape {
     ROW_ARRAY = 'row-array',
@@ -10,7 +11,10 @@ export interface JSONInsertOptions {
     schema?: string;
     create?: boolean;
     shape?: JSONTableShape;
-    columns?: SQLField[];
+    columns?: {
+        [key: string]: arrow.DataType;
+    };
+    columnsFlat?: SQLField[];
 }
 
 export interface CSVInsertOptions {
@@ -25,7 +29,10 @@ export interface CSVInsertOptions {
     detect?: boolean;
     dateFormat?: string;
     timestampFormat?: string;
-    columns?: SQLField[];
+    columns?: {
+        [key: string]: arrow.DataType;
+    };
+    columnsFlat?: SQLField[];
 }
 
 export interface ArrowInsertOptions {

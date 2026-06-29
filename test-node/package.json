@@ -1,0 +1,10 @@
+{
+  "name": "duckdb-wasm-trace-node-test",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@duckdb/node-api": "1.5.4-r.1",
+    "@run-trace/duckdb-wasm": "file:../packages/duckdb-wasm"
+  }
+}

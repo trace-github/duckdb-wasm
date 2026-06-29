@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script><title>DuckDB-WASM OPFS Nested Path Investigation</title></head>
+<body>
+<pre id="output">Starting OPFS nested path investigation...</pre>
+<script>
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+
+setTimeout(function() {
+  addLog('error', 'SAFETY TIMEOUT: no report after 90s');
+  sendReport('FAIL', { error: 'Safety timeout - test hung', elapsed: 90000 });
+}, 90000);
+</script>
+<script type="module">
+
+async function listOPFSRecursive(dir, path) {
+  const entries = [];
+  for await (const [name, handle] of dir.entries()) {
+    const fullPath = path ? path + '/' + name : name;
+    if (handle.kind === 'directory') {
+      entries.push(fullPath + '/');
+      const sub = await listOPFSRecursive(handle, fullPath);
+      entries.push(...sub);
+    } else {
+      let size = '?';
+      try { const f = await handle.getFile(); size = f.size; } catch (e) { size = 'locked'; }
+      entries.push(fullPath + ' (' + size + 'B)');
+    }
+  }
+  return entries;
+}
+
+async function removeOPFSDir(root, name) {
+  try { await root.removeEntry(name, { recursive: true }); } catch (e) { /* */ }
+}
+
+function result(label, status, detail) {
+  const msg = status + (detail ? ': ' + detail : '');
+  addLog('info', '  ' + label + ' => ' + msg);
+  _results.push({ label, value: msg });
+}
+
+async function run() {
+  const t0 = Date.now();
+  let allPassed = true;
+  const fail = (label, detail) => { result(label, 'FAIL', detail); allPassed = false; };
+
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    if (!crossOriginIsolated) throw new Error('COI required');
+
+    const root = await navigator.storage.getDirectory();
+
+    // Clean up from previous runs
+    await removeOPFSDir(root, 'testdir');
+
+    // ================================================================
+    // PRE-CREATE: Make "testdir" via browser OPFS API before any DuckDB
+    // ================================================================
+    addLog('info', '');
+    addLog('info', '=== Pre-creating "testdir" via browser OPFS API ===');
+    const testDir = await root.getDirectoryHandle('testdir', { create: true });
+    addLog('info', '  Created testdir/');
+
+    const mod = await import('/dist/duckdb-browser.mjs');
+    const { AsyncDuckDB, selectBundle, ConsoleLogger, createWorker } = mod;
+    const logger = new ConsoleLogger();
+
+    const DUCKDB_BUNDLES = {
+      coi: {
+        mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+        pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+      },
+    };
+    const bundle = await selectBundle(DUCKDB_BUNDLES);
+    addLog('info', '  Bundle: coi');
+
+    async function makeDB(opts) {
+      const w = await createWorker(bundle.mainWorker);
+      const db = new AsyncDuckDB(logger, w);
+      await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+      return { db, worker: w };
+    }
+
+    // ================================================================
+    // TEST 1: Open database at opfs://testdir/my.db
+    // ================================================================
+    addLog('info', '');
+    addLog('info', '=== Test 1: Open DB at opfs://testdir/my.db (dir pre-created) ===');
+    try {
+      const { db, worker } = await makeDB();
+      await db.open({ path: 'opfs://testdir/my.db', accessMode: 3, maximumThreads: 1 });
+      const conn = await db.connect();
+      await conn.query("CREATE TABLE t1 (id INTEGER, val VARCHAR)");
+      await conn.query("INSERT INTO t1 VALUES (1,'a'),(2,'b'),(3,'c')");
+      const r = await conn.query("SELECT count(*)::INTEGER AS n FROM t1");
+      const n = Number(r.get(0).n);
+      await conn.close();
+      await db.terminate();
+      worker.terminate();
+      if (n === 3) result('open_db_precreated_dir', 'PASS', 'created table with ' + n + ' rows');
+      else fail('open_db_precreated_dir', 'expected 3, got ' + n);
+    } catch (e) {
+      fail('open_db_precreated_dir', e.message);
+    }
+
+    // ================================================================
+    // TEST 2: Reopen and verify data persisted
+    // ================================================================
+    addLog('info', '');
+    addLog('info', '=== Test 2: Reopen opfs://testdir/my.db — data persists? ===');
+    try {
+      const { db, worker } = await makeDB();
+      await db.open({ path: 'opfs://testdir/my.db', accessMode: 3, maximumThreads: 1 });
+      const conn = await db.connect();
+      const r = await conn.query("SELECT count(*)::INTEGER AS n FROM t1");
+      const n = Number(r.get(0).n);
+      await conn.close();
+      await db.terminate();
+      worker.terminate();
+      if (n === 3) result('reopen_db_persist', 'PASS', n + ' rows persisted');
+      else fail('reopen_db_persist', 'expected 3, got ' + n);
+    } catch (e) {
+      fail('reopen_db_persist', e.message);
+    }
+
+    // ================================================================
+    // TEST 3: COPY TO opfs://testdir/out.parquet (no auto, no manual reg)
+    // ================================================================
+    addLog('info', '');
+    addLog('info', '=== Test 3: COPY TO opfs://testdir/out.parquet (no special config) ===');
+    try {
+      const { db, worker } = await makeDB();
+      await db.open({ path: ':memory:', maximumThreads: 1 });
+      const conn = await db.connect();
+      await conn.query("CREATE TABLE t3 AS SELECT i, 'v' || i::VARCHAR AS v FROM generate_series(1,50) t(i)");
+      await conn.query("COPY (SELECT * FROM t3) TO 'opfs://testdir/out.parquet' (FORMAT PARQUET)");
+      addLog('info', '  COPY TO succeeded, reading back...');
+      const r = await conn.query("SELECT count(*)::INTEGER AS n FROM read_parquet('opfs://testdir/out.parquet')");
+      const n = Number(r.get(0).n);
+      await conn.close();
+      await db.terminate();
+      worker.terminate();
+      if (n === 50) result('copy_to_precreated_dir', 'PASS', n + ' rows written and read');
+      else fail('copy_to_precreated_dir', 'expected 50, got ' + n);
+    } catch (e) {
+      fail('copy_to_precreated_dir', e.message);
+    }
+
+    // ================================================================
+    // TEST 4: COPY TO with opfs.fileHandling = 'auto'
+    // ================================================================
+    addLog('info', '');
+    addLog('info', '=== Test 4: COPY TO opfs://testdir/auto.parquet (fileHandling=auto) ===');
+    try {
+      const { db, worker } = await makeDB();
+      await db.open({ path: ':memory:', maximumThreads: 1, opfs: { fileHandling: 'auto' } });
+      const conn = await db.connect();
+      await conn.query("CREATE TABLE t4 AS SELECT i FROM generate_series(1,25) t(i)");
+      await conn.query("COPY (SELECT * FROM t4) TO 'opfs://testdir/auto.parquet' (FORMAT PARQUET)");
+      const r = await conn.query("SELECT count(*)::INTEGER AS n FROM read_parquet('opfs://testdir/auto.parquet')");
+      const n = Number(r.get(0).n);
+      await conn.close();
+      await db.terminate();
+      worker.terminate();
+      if (n === 25) result('copy_to_auto', 'PASS', n + ' rows');
+      else fail('copy_to_auto', 'expected 25, got ' + n);
+    } catch (e) {
+      fail('copy_to_auto', e.message);
+    }
+
+    // ================================================================
+    // TEST 5: registerOPFSFileName + COPY TO
+    // ================================================================
+    addLog('info', '');
+    addLog('info', '=== Test 5: registerOPFSFileName("opfs://testdir/reg.parquet") + COPY ===');
+    try {
+      const { db, worker } = await makeDB();
+      await db.open({ path: ':memory:', maximumThreads: 1 });
+      const conn = await db.connect();
+      await conn.query("CREATE TABLE t5 AS SELECT i FROM generate_series(1,30) t(i)");
+
+      await db.registerOPFSFileName('opfs://testdir/reg.parquet');
+      addLog('info', '  registerOPFSFileName succeeded');
+      await conn.query("COPY (SELECT * FROM t5) TO 'opfs://testdir/reg.parquet' (FORMAT PARQUET)");
+      addLog('info', '  COPY TO succeeded, reading back...');
+
+      await db.registerOPFSFileName('opfs://testdir/reg.parquet');
+      const r = await conn.query("SELECT count(*)::INTEGER AS n FROM read_parquet('opfs://testdir/reg.parquet')");
+      const n = Number(r.get(0).n);
+      await conn.close();
+      await db.terminate();
+      worker.terminate();
+      if (n === 30) result('register_opfs_filename', 'PASS', n + ' rows');
+      else fail('register_opfs_filename', 'expected 30, got ' + n);
+    } catch (e) {
+      fail('register_opfs_filename', e.message);
+    }
+
+    // ================================================================
+    // TEST 6: registerFileHandle with pre-created file handle
+    // ================================================================
+    addLog('info', '');
+    addLog('info', '=== Test 6: registerFileHandle(pre-created handle) + COPY ===');
+    try {
+      const fh = await testDir.getFileHandle('handle.parquet', { create: true });
+      const { db, worker } = await makeDB();
+      await db.open({ path: ':memory:', maximumThreads: 1 });
+      const conn = await db.connect();
+      await conn.query("CREATE TABLE t6 AS SELECT i FROM generate_series(1,100) t(i)");
+
+      await db.registerFileHandle('opfs://testdir/handle.parquet', fh, 2, true);
+      addLog('info', '  registerFileHandle succeeded');
+      await conn.query("COPY (SELECT * FROM t6) TO 'opfs://testdir/handle.parquet' (FORMAT PARQUET)");
+      addLog('info', '  COPY TO succeeded, reading back...');
+
+      await db.registerFileHandle('opfs://testdir/handle.parquet', fh, 2, true);
+      const r = await conn.query("SELECT count(*)::INTEGER AS n FROM read_parquet('opfs://testdir/handle.parquet')");
+      const n = Number(r.get(0).n);
+      await conn.close();
+      await db.terminate();
+      worker.terminate();
+      if (n === 100) result('register_file_handle', 'PASS', n + ' rows');
+      else fail('register_file_handle', 'expected 100, got ' + n);
+    } catch (e) {
+      fail('register_file_handle', e.message);
+    }
+
+    // ================================================================
+    // TEST 7: DB in testdir + COPY TO testdir (same dir, both nested)
+    // ================================================================
+    addLog('info', '');
+    addLog('info', '=== Test 7: DB at opfs://testdir/combo.db + COPY TO opfs://testdir/combo.parquet ===');
+    try {
+      const { db, worker } = await makeDB();
+      await db.open({ path: 'opfs://testdir/combo.db', accessMode: 3, maximumThreads: 1 });
+      const conn = await db.connect();
+      await conn.query("CREATE TABLE t7 AS SELECT i, 'row' || i::VARCHAR AS label FROM generate_series(1,200) t(i)");
+      await conn.query("COPY (SELECT * FROM t7) TO 'opfs://testdir/combo.parquet' (FORMAT PARQUET)");
+      addLog('info', '  COPY TO succeeded');
+
+      const r = await conn.query("SELECT count(*)::INTEGER AS n FROM read_parquet('opfs://testdir/combo.parquet')");
+      const n = Number(r.get(0).n);
+      await conn.close();
+      await db.terminate();
+      worker.terminate();
+      if (n === 200) result('db_and_copy_same_dir', 'PASS', n + ' rows');
+      else fail('db_and_copy_same_dir', 'expected 200, got ' + n);
+    } catch (e) {
+      fail('db_and_copy_same_dir', e.message);
+    }
+
+    // ================================================================
+    // TEST 8: Two levels deep — opfs://testdir/sub/deep.db
+    // ================================================================
+    addLog('info', '');
+    addLog('info', '=== Test 8: Two levels deep — opfs://testdir/sub/deep.db ===');
+    try {
+      // Pre-create the sub-directory
+      await testDir.getDirectoryHandle('sub', { create: true });
+      addLog('info', '  Pre-created testdir/sub/');
+
+      const { db, worker } = await makeDB();
+      await db.open({ path: 'opfs://testdir/sub/deep.db', accessMode: 3, maximumThreads: 1 });
+      const conn = await db.connect();
+      await conn.query("CREATE TABLE t8 (x INTEGER)");
+      await conn.query("INSERT INTO t8 VALUES (42)");
+      const r = await conn.query("SELECT x::INTEGER AS x FROM t8");
+      const x = Number(r.get(0).x);
+      await conn.close();
+      await db.terminate();
+      worker.terminate();
+      if (x === 42) result('two_levels_deep', 'PASS', 'value = ' + x);
+      else fail('two_levels_deep', 'expected 42, got ' + x);
+    } catch (e) {
+      fail('two_levels_deep', e.message);
+    }
+
+    // ================================================================
+    // TEST 9: COPY TO two levels deep — opfs://testdir/sub/export.parquet
+    // ================================================================
+    addLog('info', '');
+    addLog('info', '=== Test 9: COPY TO opfs://testdir/sub/export.parquet ===');
+    try {
+      const { db, worker } = await makeDB();
+      await db.open({ path: ':memory:', maximumThreads: 1 });
+      const conn = await db.connect();
+      await conn.query("CREATE TABLE t9 AS SELECT i FROM generate_series(1,75) t(i)");
+      await conn.query("COPY (SELECT * FROM t9) TO 'opfs://testdir/sub/export.parquet' (FORMAT PARQUET)");
+      const r = await conn.query("SELECT count(*)::INTEGER AS n FROM read_parquet('opfs://testdir/sub/export.parquet')");
+      const n = Number(r.get(0).n);
+      await conn.close();
+      await db.terminate();
+      worker.terminate();
+      if (n === 75) result('copy_two_levels', 'PASS', n + ' rows');
+      else fail('copy_two_levels', 'expected 75, got ' + n);
+    } catch (e) {
+      fail('copy_two_levels', e.message);
+    }
+
+    // ================================================================
+    // TEST 10: read_parquet from a file written by a previous DB instance
+    // ================================================================
+    addLog('info', '');
+    addLog('info', '=== Test 10: Fresh DB reads opfs://testdir/out.parquet (written by test 3) ===');
+    try {
+      const { db, worker } = await makeDB();
+      await db.open({ path: ':memory:', maximumThreads: 1 });
+      const conn = await db.connect();
+      const r = await conn.query("SELECT count(*)::INTEGER AS n FROM read_parquet('opfs://testdir/out.parquet')");
+      const n = Number(r.get(0).n);
+      await conn.close();
+      await db.terminate();
+      worker.terminate();
+      if (n === 50) result('read_across_instances', 'PASS', n + ' rows from previous instance');
+      else fail('read_across_instances', 'expected 50, got ' + n);
+    } catch (e) {
+      fail('read_across_instances', e.message);
+    }
+
+    // ================================================================
+    // OPFS filesystem dump
+    // ================================================================
+    addLog('info', '');
+    addLog('info', '=== OPFS filesystem contents ===');
+    const allEntries = await listOPFSRecursive(root, '');
+    for (const e of allEntries) addLog('info', '  ' + e);
+
+    // Cleanup
+    await removeOPFSDir(root, 'testdir');
+
+    const elapsed = Date.now() - t0;
+    addLog('info', '');
+    addLog('info', 'Completed in ' + elapsed + 'ms');
+    sendReport(allPassed ? 'PASS' : 'FAIL', { elapsed, bundle: 'coi' });
+
+  } catch (e) {
+    addLog('error', 'FATAL: ' + e.message);
+    addLog('error', e.stack);
+    sendReport('FAIL', { error: e.message, stack: e.stack });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

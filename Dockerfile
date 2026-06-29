@@ -20,20 +20,17 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # Install js-beautify globally (needed by wasm_build_lib.sh)
 RUN npm install -g js-beautify
 
-# Install Emscripten SDK 4.0.3
-# This version natively bundles binaryen v126, which supports
-# --enable-bulk-memory-opt. No separate binaryen install needed.
+# Install Emscripten SDK (4.0.3 for all builds — EH + COI/WasmFS)
 ENV EMSDK=/opt/emsdk
 RUN git clone https://github.com/emscripten-core/emsdk.git $EMSDK \
     && cd $EMSDK \
     && ./emsdk install 4.0.3 \
     && ./emsdk activate 4.0.3
 
-# Set up emscripten in PATH. emsdk activate already wrote .emscripten config.
 ENV PATH="$EMSDK:$EMSDK/upstream/emscripten:$PATH"
 ENV EM_CONFIG="$EMSDK/.emscripten"
 
-# Install Rust nightly for evalexpr_rhai (wasm32-unknown-emscripten is tier 3)
+# Install Rust nightly (wasm32-unknown-emscripten is tier 3)
 ENV RUSTUP_HOME=/opt/rustup
 ENV CARGO_HOME=/opt/cargo
 ENV PATH="$CARGO_HOME/bin:$PATH"
@@ -42,10 +39,9 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
     && rustup target add wasm32-unknown-emscripten --toolchain nightly \
     && rustup component add rust-src --toolchain nightly
 
-# Configure ccache to use the mounted cache volume
+# Configure ccache and cargo cache
 ENV CCACHE_DIR=/cache/ccache
 ENV CCACHE_MAXSIZE=5G
-# Persist Cargo build artifacts across Docker runs
 ENV CARGO_TARGET_DIR=/cache/cargo-target
 
 WORKDIR /src

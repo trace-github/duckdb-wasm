@@ -1,8 +1,6 @@
 /*
  * Custom Lua library initializer for WASM builds with FILESYSTEM=0 (MVP/EH).
- * Excludes io, os, and package libs which require filesystem syscalls that
- * are not available when Emscripten is built without filesystem support.
- *
+ * Excludes io, os, and package libs which require filesystem syscalls.
  * Adapted from Lua 5.4 linit.c (MIT License).
  */
 #define LUA_LIB

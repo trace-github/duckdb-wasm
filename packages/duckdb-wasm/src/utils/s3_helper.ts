@@ -22,10 +22,9 @@ export interface S3PayloadParams {
 
 const getHTTPHost = function (config: S3Config | undefined, url: string, bucket: string): string {
     if (config?.endpoint?.startsWith('http')) {
-        // Endpoint is a full url, we append the bucket
-        const httpHost = `${config?.endpoint}`;
-        const offset = httpHost.indexOf('://') + 3;
-        return httpHost.substring(offset);
+        // Endpoint is a full url, extract just the host (no path)
+        const endpointUrl = new URL(config.endpoint);
+        return endpointUrl.host;
     } else if (config?.endpoint) {
         // Endpoint is not a full url and the https://{bucket}.{domain} format will be used
         return `${bucket}.${config?.endpoint}`;
@@ -38,12 +37,20 @@ const getHTTPHost = function (config: S3Config | undefined, url: string, bucket:
 export function getS3Params(config: S3Config | undefined, url: string, method: string): S3Params {
     const parsedS3Url = parseS3Url(url);
 
-    // when using S3 path-style access, the signed URL should also include the bucket name,
-    //  as it is present in the HTTP URL path.
+    // when using S3 path-style access, the signed URL should also include the endpoint's path + bucket name,
+    //  as they will both be present in the HTTP URL path.
     // See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-bucket-intro.html#path-style-url-ex
     let path = parsedS3Url.path;
     if (isPathStyleAccess(config)) {
-        path = `/${parsedS3Url.bucket}${path}`;
+        // Extract endpoint path if present (e.g., "/some/path" from "https://host/some/path")
+        let endpointPath = '';
+        if (config?.endpoint) {
+            const endpointUrl = new URL(config.endpoint);
+            if (endpointUrl.pathname !== '/') {
+                endpointPath = endpointUrl.pathname;
+            }
+        }
+        path = `${endpointPath}/${parsedS3Url.bucket}${path}`;
     }
     return {
         url: path,
@@ -143,23 +150,12 @@ export function createS3Headers(params: S3Params, payloadParams: S3PayloadParams
         '/aws4_request\n' +
         canonicalRequestHashStr;
 
-    // ts-ignore's because library can accept array buffer as key, but TS arg is incorrect
     const signKey = 'AWS4' + params.secretAccessKey;
     const kDate = sha256.hmac.arrayBuffer(signKey, params.dateNow);
 
-    // Note, js-sha256 has a bug in the TS interface that only supports strings as keys, while we need a bytearray
-    // as key. PR is open but unmerged: https://github.com/emn178/js-sha256/pull/25
-    // eslint-disable-next-line
-    // @ts-ignore
     const kRegion = sha256.hmac.arrayBuffer(kDate, params.region);
-    // eslint-disable-next-line
-    // @ts-ignore
     const kService = sha256.hmac.arrayBuffer(kRegion, params.service);
-    // eslint-disable-next-line
-    // @ts-ignore
     const signingKey = sha256.hmac.arrayBuffer(kService, 'aws4_request');
-    // eslint-disable-next-line
-    // @ts-ignore
     const signature = sha256.hmac(signingKey, stringToSign);
 
     res.set(
@@ -191,7 +187,7 @@ const createS3HeadersFromS3Config = function (
     const params = getS3Params(config, url, method);
     const payloadParams = {
         contentType: contentType,
-        contentHash: payload ? sha256.hex(payload) : null,
+        contentHash: payload ? sha256.hex(payload!) : null,
     } as S3PayloadParams;
     return createS3Headers(params, payloadParams);
 };

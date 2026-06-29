@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
-<head><title>DuckDB-WASM metric_table Test</title></head>
+<head>
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script><title>DuckDB-WASM metric_table Test</title></head>
 <body>
 <pre id="output">Starting metric_table test...</pre>
 <script>
@@ -42,15 +43,15 @@ window.onunhandledrejection = function(e) {
 </script>
 <script type="module">
 
-function bufText(buf) {
-  return new TextDecoder().decode(new Uint8Array(buf));
-}
-function extractStr(buf) {
-  const text = bufText(buf);
-  if (text.includes('true'))  return 'true';
-  if (text.includes('false')) return 'false';
-  const m = text.match(/(\d+)/g);
-  return m ? m[m.length - 1] : null;
+// conn.query() returns an Arrow Table; extract values via .get(row).col.
+function extractStr(table) {
+  const row = table.get(0);
+  if (!row) return null;
+  const col = table.schema.fields[0].name;
+  const v = row[col];
+  if (v == null) return null;
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  return String(v);
 }
 
 async function run() {
@@ -61,18 +62,30 @@ async function run() {
     addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
     if (!crossOriginIsolated) throw new Error('CrossOriginIsolated is false');
 
-    const mod = await import('/dist/duckdb-wasm.mjs');
-    const bundleConfig = {
-      mainModule:    '/dist/duckdb-coi.wasm',
-      mainWorker:    '/dist/duckdb-browser-coi.worker.js',
-      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    const mod = await import('/dist/duckdb-browser.mjs');
+    const { AsyncDuckDB, selectBundle, ConsoleLogger, createWorker } = mod;
+
+    const DUCKDB_BUNDLES = {
+      eh: {
+        mainModule: new URL('/dist/duckdb-eh.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-eh.worker.js', window.location.href).href,
+      },
+      coi: {
+        mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+        pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+      },
     };
-    const { AsyncDuckDB, ConsoleLogger } = mod;
-    const worker = new Worker(bundleConfig.mainWorker);
-    worker.onerror = (e) => addLog('error', 'Worker error: ' + (e.message || e));
+
+    addLog('info', 'Selecting bundle...');
+    const bundle = await selectBundle(DUCKDB_BUNDLES);
+    const bundleName = bundle.mainModule.match(/duckdb-(\w+)\.wasm/)[1];
+    addLog('info', 'Selected bundle: ' + bundleName);
+
+    const worker = await createWorker(bundle.mainWorker);
     db = new AsyncDuckDB(new ConsoleLogger(), worker);
-    await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
-    await db.open({ maximumThreads: 4 });
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    await db.open({});
     const conn = await db.connect();
 
     let pass = 0, fail = 0, r;

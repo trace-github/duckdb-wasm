@@ -12,11 +12,31 @@ class HTTPLogger;
 class FileOpener;
 struct FileOpenerInfo;
 class HTTPState;
+HTTPHeaders TransformHeadersWasm(const HTTPHeaders &header_map, const HTTPParams &params) {
+    auto &httpfs_params = params.Cast<HTTPFSParams>();
+
+    HTTPHeaders res_headers;
+    for (auto &header : header_map) {
+        res_headers.Insert(header.first, header.second);
+    }
+    if (!httpfs_params.pre_merged_headers) {
+        for (auto &entry : params.extra_headers) {
+            res_headers.Insert(entry.first, entry.second);
+        }
+    }
+    return res_headers;
+}
 
 class HTTPWasmClient : public HTTPClient {
    public:
-    HTTPWasmClient(HTTPFSParams &http_params, const string &proto_host_port) { host_port = proto_host_port; }
-    void Initialize(HTTPParams &params) override {}
+    HTTPWasmClient(HTTPFSParams &http_params, const string &proto_host_port) {
+        host_port = proto_host_port;
+        state = http_params.state;
+    }
+    void Initialize(HTTPParams &params) override {
+        auto &http_params = params.Cast<HTTPFSParams>();
+        state = http_params.state;
+    }
     string host_port;
 
     unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
@@ -38,16 +58,16 @@ class HTTPWasmClient : public HTTPClient {
         if ((path.rfind("https://", 0) != 0) && (path.rfind("http://", 0) != 0)) {
             path = "https://" + path;
         }
+        auto headers = TransformHeadersWasm(info.headers, info.params);
 
         int n = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             n++;
         }
-
         char **z = (char **)(void *)malloc(n * 4 * 2);
 
         int i = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             z[i] = (char *)malloc(h.first.size() * 4 + 1);
             memset(z[i], 0, h.first.size() * 4 + 1);
             memcpy(z[i], h.first.c_str(), h.first.size());
@@ -81,11 +101,11 @@ class HTTPWasmClient : public HTTPClient {
                     try {
 			var z = encodeURI(UTF8ToString(ptr1));
 			if (z === "Host") z = "X-Host-Override";
-			if (z === "User-Agent") z = "X-user-agent";
-			if (z === "Authorization") {
+			if (z === "User-Agent") {}
+			else if (z === "Authorization") {
                         	xhr.setRequestHeader(z, UTF8ToString(ptr2));
 			} else {
-				
+
                         	xhr.setRequestHeader(z, encodeURI(UTF8ToString(ptr2)));
 			}
                     } catch (error) {
@@ -103,13 +123,14 @@ class HTTPWasmClient : public HTTPClient {
                 var uInt8Array = xhr.response;
 
                 var len = uInt8Array.byteLength;
-                var fileOnWasmHeap = _malloc(len + 4);
+                var fileOnWasmHeap = _malloc(len + 8);
 
                 var properArray = new Uint8Array(uInt8Array);
 
                 for (var iii = 0; iii < len; iii++) {
-                    Module.HEAPU8[iii + fileOnWasmHeap + 4] = properArray[iii];
+                    Module.HEAPU8[iii + fileOnWasmHeap + 8] = properArray[iii];
                 }
+
                 var LEN123 = new Uint8Array(4);
                 LEN123[0] = len % 256;
                 len -= LEN123[0];
@@ -123,14 +144,53 @@ class HTTPWasmClient : public HTTPClient {
                 LEN123[3] = len % 256;
                 len -= LEN123[3];
                 len /= 256;
+                Module.HEAPU8.set(LEN123, fileOnWasmHeap + 4);
+
+		var headers = Uint8Array.from(Array.from(xhr.getAllResponseHeaders()).map(letter => letter.charCodeAt(0)));
+		len = headers.byteLength;
+                var headersOnWasmHeap = _malloc(len + 8);
+                for (var iii = 0; iii < len; iii++) {
+                    Module.HEAPU8[iii + headersOnWasmHeap + 8] = headers[iii];
+                }
+
+                LEN123 = new Uint8Array(4);
+                LEN123[0] = len % 256;
+                len -= LEN123[0];
+                len /= 256;
+                LEN123[1] = len % 256;
+                len -= LEN123[1];
+                len /= 256;
+                LEN123[2] = len % 256;
+                len -= LEN123[2];
+                len /= 256;
+                LEN123[3] = len % 256;
+                len -= LEN123[3];
+                len /= 256;
+                Module.HEAPU8.set(LEN123, headersOnWasmHeap + 4);
+
+		len = headersOnWasmHeap;
+                LEN123 = new Uint8Array(4);
+                LEN123[0] = len % 256;
+                len -= LEN123[0];
+                len /= 256;
+                LEN123[1] = len % 256;
+                len -= LEN123[1];
+                len /= 256;
+                LEN123[2] = len % 256;
+                len -= LEN123[2];
+                len /= 256;
+                LEN123[3] = len % 256;
+                len -= LEN123[3];
+                len /= 256;
                 Module.HEAPU8.set(LEN123, fileOnWasmHeap);
+
                 return fileOnWasmHeap;
             },
             path.c_str(), n, z, "GET");
         // clang-format on
 
         i = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             free(z[i]);
             i++;
             free(z[i]);
@@ -143,23 +203,72 @@ class HTTPWasmClient : public HTTPClient {
             res->reason = "Please consult the browser console for details, might be potentially a CORS error";
         } else {
             res = duckdb::make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
-            uint64_t LEN = 0;
-            LEN *= 256;
-            LEN += ((uint8_t *)exe)[3];
-            LEN *= 256;
-            LEN += ((uint8_t *)exe)[2];
-            LEN *= 256;
-            LEN += ((uint8_t *)exe)[1];
-            LEN *= 256;
-            LEN += ((uint8_t *)exe)[0];
-            res->body = string(exe + 4, LEN);
 
-            idx_t LEN_X_T = LEN;
+            uint64_t next = 0;
+            {
+                uint64_t LEN = 0;
+                LEN *= 256;
+                LEN += ((uint8_t *)exe)[3];
+                LEN *= 256;
+                LEN += ((uint8_t *)exe)[2];
+                LEN *= 256;
+                LEN += ((uint8_t *)exe)[1];
+                LEN *= 256;
+                LEN += ((uint8_t *)exe)[0];
+                next = LEN;
+            }
+            uint64_t len = 0;
+            {
+                uint64_t LEN = 0;
+                LEN *= 256;
+                LEN += ((uint8_t *)exe)[3 + 4];
+                LEN *= 256;
+                LEN += ((uint8_t *)exe)[2 + 4];
+                LEN *= 256;
+                LEN += ((uint8_t *)exe)[1 + 4];
+                LEN *= 256;
+                LEN += ((uint8_t *)exe)[0 + 4];
+                len = LEN;
+            }
+
+            uint64_t len_headers = 0;
+            {
+                uint64_t LEN = 0;
+                LEN *= 256;
+                LEN += ((uint8_t *)next)[3 + 4];
+                LEN *= 256;
+                LEN += ((uint8_t *)next)[2 + 4];
+                LEN *= 256;
+                LEN += ((uint8_t *)next)[1 + 4];
+                LEN *= 256;
+                LEN += ((uint8_t *)next)[0 + 4];
+                len_headers = LEN;
+            }
+
+            char *ptr = reinterpret_cast<char *>(next);
+
+            string headers = string(ptr + 8, len_headers);
+
+            vector<string> vec_headers = StringUtil::Split(headers, "\r\n");
+
+            for (auto h : vec_headers) {
+                int j = 0;
+                while (j < h.size() && h[j] != ':') j++;
+                string head = string(h.c_str(), j);
+                while (j < h.size() && h[j] != ' ') j++;
+                string tail = string(h.c_str() + j + 1);
+                res->headers.Insert(head, tail);
+            }
+
+            res->body = string(exe + 8, len);
+
+            idx_t LEN_X_T = len;
             if (info.content_handler) {
-                info.content_handler(((const unsigned char *)exe) + 4, LEN_X_T);
+                info.content_handler(((const unsigned char *)exe) + 8, LEN_X_T);
             }
 
             free(exe);
+            free(ptr);
         }
 
         return res;
@@ -182,15 +291,16 @@ class HTTPWasmClient : public HTTPClient {
         if ((path.rfind("https://", 0) != 0) && (path.rfind("http://", 0) != 0)) {
             path = "https://" + path;
         }
+        auto headers = TransformHeadersWasm(info.headers, info.params);
         int n = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             n++;
         }
 
         char **z = (char **)(void *)malloc(n * 4 * 2);
 
         int i = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             z[i] = (char *)malloc(h.first.size() * 4 + 1);
             memset(z[i], 0, h.first.size() * 4 + 1);
             memcpy(z[i], h.first.c_str(), h.first.size());
@@ -222,11 +332,12 @@ class HTTPWasmClient : public HTTPClient {
                     var ptr1 = HEAP32[($2)/4 + i ];
                     var ptr2 = HEAP32[($2)/4 + i + 1];
 
+console.log('HEAD', UTF8ToString(ptr1), UTF8ToString(ptr2));
                     try {
 			var z = encodeURI(UTF8ToString(ptr1));
 			if (z === "Host") z = "X-Host-Override";
-			if (z === "User-Agent") z = "X-user-agent";
-			if (z === "Authorization") {
+			if (z === "User-Agent") {}
+			else if (z === "Authorization") {
                         	xhr.setRequestHeader(z, UTF8ToString(ptr2));
 			} else {
 				
@@ -313,7 +424,8 @@ class HTTPWasmClient : public HTTPClient {
             path.c_str(), n, z, "HEAD");
 
         i = 0;
-        for (auto h : info.headers) {
+
+        for (auto h : headers) {
             free(z[i]);
             i++;
             free(z[i]);
@@ -423,16 +535,16 @@ res->headers.Insert(head, tail);
         if ((path.rfind("https://", 0) != 0) && (path.rfind("http://", 0) != 0)) {
             path = "https://" + path;
         }
-
+        auto headers = TransformHeadersWasm(info.headers, info.params);
         int n = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             n++;
         }
 
         char **z = (char **)(void *)malloc(n * 4 * 2);
 
         int i = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             z[i] = (char *)malloc(h.first.size() * 4 + 1);
             memset(z[i], 0, h.first.size() * 4 + 1);
             memcpy(z[i], h.first.c_str(), h.first.size());
@@ -471,8 +583,8 @@ res->headers.Insert(head, tail);
                     try {
 			var z = encodeURI(UTF8ToString(ptr1));
 			if (z === "Host") z = "X-Host-Override";
-			if (z === "User-Agent") z = "X-user-agent";
-			if (z === "Authorization") {
+			if (z === "User-Agent") {}
+			else if (z === "Authorization") {
                         	xhr.setRequestHeader(z, UTF8ToString(ptr2));
 			} else {
 				
@@ -529,7 +641,7 @@ res->headers.Insert(head, tail);
         free(payload);
 
         i = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             free(z[i]);
             i++;
             free(z[i]);
@@ -579,15 +691,16 @@ res->headers.Insert(head, tail);
             path = "https://" + path;
         }
 
+        auto headers = TransformHeadersWasm(info.headers, info.params);
         int n = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             n++;
         }
 
         char **z = (char **)(void *)malloc(n * 4 * 2);
 
         int i = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             z[i] = (char *)malloc(h.first.size() * 4 + 1);
             memset(z[i], 0, h.first.size() * 4 + 1);
             memcpy(z[i], h.first.c_str(), h.first.size());
@@ -626,8 +739,8 @@ res->headers.Insert(head, tail);
                     try {
 			var z = encodeURI(UTF8ToString(ptr1));
 			if (z === "Host") z = "X-Host-Override";
-			if (z === "User-Agent") z = "X-user-agent";
-			if (z === "Authorization") {
+			if (z === "User-Agent") {}
+			else if (z === "Authorization") {
                         	xhr.setRequestHeader(z, UTF8ToString(ptr2));
 			} else {
 				
@@ -684,7 +797,7 @@ res->headers.Insert(head, tail);
         free(payload);
 
         i = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             free(z[i]);
             i++;
             free(z[i]);
@@ -734,15 +847,16 @@ res->headers.Insert(head, tail);
             path = "https://" + path;
         }
 
+        auto headers = TransformHeadersWasm(info.headers, info.params);
         int n = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             n++;
         }
 
         char **z = (char **)(void *)malloc(n * 4 * 2);
 
         int i = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             z[i] = (char *)malloc(h.first.size() * 4 + 1);
             memset(z[i], 0, h.first.size() * 4 + 1);
             memcpy(z[i], h.first.c_str(), h.first.size());
@@ -777,8 +891,8 @@ res->headers.Insert(head, tail);
                     try {
 			var z = encodeURI(UTF8ToString(ptr1));
 			if (z === "Host") z = "X-Host-Override";
-			if (z === "User-Agent") z = "X-user-agent";
-			if (z === "Authorization") {
+			if (z === "User-Agent") {}
+			else if (z === "Authorization") {
                         	xhr.setRequestHeader(z, UTF8ToString(ptr2));
 			} else {
 				
@@ -826,7 +940,7 @@ res->headers.Insert(head, tail);
         // clang-format on
 
         i = 0;
-        for (auto h : info.headers) {
+        for (auto h : headers) {
             free(z[i]);
             i++;
             free(z[i]);

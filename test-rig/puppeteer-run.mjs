@@ -6,14 +6,13 @@
 //   --keep-alive      Keep server+browser running after report
 //   --port PORT       Server port (default 9876)
 //   --timeout MS      Timeout in ms (default 60000)
-//   --coi             Run COI test
-//   --evalexpr        Run evalexpr test
 //   --db-stress       Run DB stress test
 //   --file-stress     Run file stress test
 //   --opfs-persist    Run OPFS persist test
-//   --wasmfs          Run WasmFS test
-//   --bench-threads   Run thread benchmark (bench-threads.html)
+//   --buffer-reg      Run buffer registration test
+//   --lua             Run Lua extension test
 //   --hash-ext        Run hash_ext extension test
+//   --metric-table    Run metric table test
 //   --debug-port PORT Chrome remote debugging port (default 9222)
 
 import { spawn } from 'node:child_process';
@@ -40,17 +39,18 @@ for (let i = 0; i < args.length; i++) {
     case '--port':       port = parseInt(args[++i], 10); break;
     case '--timeout':    timeout = parseInt(args[++i], 10); break;
     case '--debug-port': debugPort = parseInt(args[++i], 10); break;
-    case '--coi':        page = '/coi-test.html'; break;
-    case '--evalexpr':   page = '/evalexpr-test.html'; break;
     case '--db-stress':  page = '/db-stress-test.html'; break;
     case '--file-stress': page = '/file-stress-test.html'; break;
     case '--opfs-persist': page = '/opfs-persist-test.html'; break;
-    case '--wasmfs':     page = '/wasmfs-test.html'; break;
     case '--buffer-reg':    page = '/buffer-reg-test.html'; break;
     case '--lua':           page = '/lua-test.html'; break;
-    case '--bench-threads': page = '/bench-threads.html'; break;
     case '--hash-ext':      page = '/hash-ext-test.html'; break;
     case '--metric-table':  page = '/metric-table-test.html'; break;
+    case '--opfs-open':     page = '/opfs-open-test.html'; break;
+    case '--wasmfs':        page = '/wasmfs-test.html'; break;
+    case '--thread-file-stress': page = '/thread-file-stress-test.html'; break;
+    case '--durability':    page = '/durability-test.html'; break;
+    case '--opfs-nested':   page = '/opfs-nested-test.html'; break;
     default:
       console.error(`Unknown option: ${args[i]}`);
       process.exit(1);
@@ -138,6 +138,7 @@ async function main() {
   console.log('Server is ready.');
 
   let exitCode = 0;
+  let pageErrored = false;
 
   // Track server exit
   let serverExited = false;
@@ -210,9 +211,12 @@ async function main() {
       console.log(`[${prefix}] ${text}`);
     });
 
-    // Capture page errors
+    // Capture page errors. Any uncaught page error fails the run — a passing
+    // /report can otherwise mask an async error (e.g. a COI pthread worker
+    // "Module is not defined" that fires after the PASS report was already sent).
     browserPage.on('pageerror', (err) => {
       console.error(`[BROWSER:PAGEERROR] ${err.message}`);
+      pageErrored = true;
     });
 
     // Navigate to the test page
@@ -277,6 +281,12 @@ async function main() {
     if (!serverExited) {
       serverProc.kill('SIGTERM');
     }
+  }
+
+  // A passing report must not mask an uncaught page error.
+  if (pageErrored && exitCode === 0) {
+    console.error('FAIL: uncaught page error(s) occurred during the run (see [BROWSER:PAGEERROR] above) — failing despite the reported status.');
+    exitCode = 3;
   }
 
   process.exit(exitCode);

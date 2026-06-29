@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script><title>DuckDB-WASM Multi-Thread File I/O Stress (100 cycles)</title></head>
+<body>
+<pre id="output">Starting multi-thread file I/O stress test (100 cycles)...</pre>
+<script>
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+
+setTimeout(function() {
+  addLog('error', 'SAFETY TIMEOUT: no report after 300s');
+  sendReport('FAIL', { error: 'Safety timeout - test hung', elapsed: 300000 });
+}, 300000);
+</script>
+<script type="module">
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT after ' + ms + 'ms in: ' + label)), ms))
+  ]);
+}
+
+function getFirstInt(table) {
+  const row = table.get(0);
+  if (!row) return null;
+  const col = table.schema.fields[0].name;
+  return Number(row[col]);
+}
+
+async function cleanOPFS(prefix) {
+  try {
+    const root = await navigator.storage.getDirectory();
+    for await (const [name] of root.entries()) {
+      if (name.startsWith(prefix)) {
+        try { await root.removeEntry(name); } catch (e) { /* locked */ }
+      }
+    }
+  } catch (e) { /* */ }
+}
+
+async function listOPFS(prefix) {
+  const entries = [];
+  try {
+    const root = await navigator.storage.getDirectory();
+    for await (const [name, handle] of root.entries()) {
+      if (!prefix || name.startsWith(prefix)) {
+        let size = '?';
+        if (handle.kind === 'file') {
+          try { const f = await handle.getFile(); size = f.size; } catch (e) { size = 'locked'; }
+        }
+        entries.push({ name, size });
+      }
+    }
+  } catch (e) { /* */ }
+  return entries;
+}
+
+const CYCLES = 100;
+const ROWS_PER_TABLE = 500;
+const THREADS = 4;
+
+async function run() {
+  const t0 = Date.now();
+  const RUN_ID = Date.now().toString(36);
+  const PREFIX = 'tfs_' + RUN_ID + '_';
+
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    if (!crossOriginIsolated) throw new Error('CrossOriginIsolated required for COI bundle');
+
+    await cleanOPFS('tfs_');
+
+    addLog('info', 'Importing module...');
+    const mod = await import('/dist/duckdb-browser.mjs');
+    const { AsyncDuckDB, ConsoleLogger, createWorker } = mod;
+
+    const BUNDLE = {
+      mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+      mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+      pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+    };
+
+    addLog('info', 'Using COI bundle with ' + THREADS + ' threads, ' + CYCLES + ' cycles, ' + ROWS_PER_TABLE + ' rows/table');
+
+    let passed = 0;
+    let failed = 0;
+
+    for (let cycle = 0; cycle < CYCLES; cycle++) {
+      const cycleStart = Date.now();
+      const dbFile = PREFIX + 'cycle_' + cycle + '.db';
+      const parquetFile = PREFIX + 'out_' + cycle + '.parquet';
+      let db = null;
+
+      try {
+        // --- Phase 1: Create DB, write table, export to parquet file ---
+        const logger = new ConsoleLogger();
+        const worker = await createWorker(BUNDLE.mainWorker);
+        db = new AsyncDuckDB(logger, worker);
+        await db.instantiate(BUNDLE.mainModule, BUNDLE.pthreadWorker);
+
+        await db.open({
+          path: 'opfs://' + dbFile,
+          accessMode: 3,
+          maximumThreads: THREADS,
+        });
+
+        let conn = await db.connect();
+
+        // Create table with data
+        await conn.query(`
+          CREATE TABLE cycle_data AS
+          SELECT
+            ${cycle} AS cycle_id,
+            i AS row_id,
+            'item_' || i::VARCHAR AS label,
+            (random() * 1000)::INTEGER AS value
+          FROM generate_series(1, ${ROWS_PER_TABLE}) t(i)
+        `);
+
+        // Export to parquet file on OPFS
+        await conn.query(`COPY cycle_data TO 'opfs://${parquetFile}' (FORMAT PARQUET)`);
+
+        // Verify row count before stopping
+        const countBefore = getFirstInt(await conn.query('SELECT count(*) FROM cycle_data'));
+        if (countBefore !== ROWS_PER_TABLE) {
+          throw new Error('Cycle ' + cycle + ' write: expected ' + ROWS_PER_TABLE + ' rows, got ' + countBefore);
+        }
+
+        await conn.close();
+        await db.terminate();
+        db = null;
+
+        // --- Phase 2: Restart DB, read back from parquet ---
+        const worker2 = await createWorker(BUNDLE.mainWorker);
+        db = new AsyncDuckDB(logger, worker2);
+        await db.instantiate(BUNDLE.mainModule, BUNDLE.pthreadWorker);
+
+        await db.open({
+          path: 'opfs://' + dbFile,
+          accessMode: 3,
+          maximumThreads: THREADS,
+        });
+
+        conn = await db.connect();
+
+        // Read back from the parquet file
+        const countParquet = getFirstInt(await conn.query(`SELECT count(*) FROM 'opfs://${parquetFile}'`));
+        if (countParquet !== ROWS_PER_TABLE) {
+          throw new Error('Cycle ' + cycle + ' read parquet: expected ' + ROWS_PER_TABLE + ' rows, got ' + countParquet);
+        }
+
+        // Verify table persisted in the database
+        const countDB = getFirstInt(await conn.query('SELECT count(*) FROM cycle_data'));
+        if (countDB !== ROWS_PER_TABLE) {
+          throw new Error('Cycle ' + cycle + ' read db: expected ' + ROWS_PER_TABLE + ' rows, got ' + countDB);
+        }
+
+        // Verify cycle_id to ensure we're reading the right data
+        const cycleId = getFirstInt(await conn.query('SELECT cycle_id FROM cycle_data LIMIT 1'));
+        if (cycleId !== cycle) {
+          throw new Error('Cycle ' + cycle + ' data integrity: expected cycle_id=' + cycle + ', got ' + cycleId);
+        }
+
+        await conn.close();
+        await db.terminate();
+        db = null;
+
+        passed++;
+        const elapsed = Date.now() - cycleStart;
+        if (cycle % 10 === 0 || cycle === CYCLES - 1) {
+          addLog('info', 'Cycle ' + cycle + '/' + CYCLES + ' PASS (' + elapsed + 'ms)');
+        }
+
+      } catch (e) {
+        failed++;
+        addLog('error', 'Cycle ' + cycle + ' FAIL: ' + e.message);
+        if (db) {
+          try { await db.terminate(); } catch (_) {}
+        }
+        // Stop early if too many failures
+        if (failed >= 5) {
+          addLog('error', 'Too many failures (' + failed + '), aborting');
+          break;
+        }
+      }
+    }
+
+    const totalElapsed = Date.now() - t0;
+    const avgMs = (totalElapsed / (passed + failed)).toFixed(1);
+
+    // Check OPFS state
+    const files = await listOPFS(PREFIX);
+    addLog('info', 'OPFS files created: ' + files.length);
+
+    _results.push({ key: 'cycles_passed', value: passed });
+    _results.push({ key: 'cycles_failed', value: failed });
+    _results.push({ key: 'total_ms', value: totalElapsed });
+    _results.push({ key: 'avg_cycle_ms', value: avgMs });
+    _results.push({ key: 'opfs_files', value: files.length });
+
+    if (failed > 0) {
+      addLog('error', passed + '/' + CYCLES + ' passed, ' + failed + ' failed (' + totalElapsed + 'ms total, ' + avgMs + 'ms avg)');
+      sendReport('FAIL');
+    } else {
+      addLog('info', 'All ' + CYCLES + ' cycles passed in ' + totalElapsed + 'ms (' + avgMs + 'ms avg/cycle)');
+      sendReport('PASS');
+    }
+
+    // Cleanup
+    await cleanOPFS(PREFIX);
+
+  } catch (e) {
+    addLog('error', 'Fatal: ' + e.message + '\n' + (e.stack || ''));
+    sendReport('FAIL', { error: e.message, stack: e.stack || '' });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

@@ -60,16 +60,9 @@ target_include_directories(lua_c_lib PUBLIC ${LUA_C_SOURCE_DIR})
 
 if(EMSCRIPTEN)
   if(WITH_WASM_EXCEPTIONS)
-    # EH and COI targets use native Wasm exceptions (-fwasm-exceptions).
-    # Lua's C error handling uses setjmp/longjmp; compile with the same flag
-    # so longjmp uses the native Wasm mechanism instead of invoke_ wrappers.
     target_compile_options(lua_c_lib PRIVATE -fwasm-exceptions)
   endif()
   if(WITH_WASM_THREADS)
-    # COI target: all object files must be compiled with atomics+bulk-memory
-    # for shared memory (pthreads). Emscripten adds these to C++ via
-    # -sUSE_PTHREADS=1 in CMAKE_CXX_FLAGS, but Lua is a C library so we
-    # must add them explicitly.
     target_compile_options(lua_c_lib PRIVATE -matomics -mbulk-memory -sUSE_PTHREADS=1)
   endif()
 endif()

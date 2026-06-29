@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8">
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script>
+<title>quack wasm client (browser)</title></head>
+<body>
+<pre id="out">running…</pre>
+<script type="module">
+// Browser quack client: our wasm build uses the browser's NATIVE synchronous
+// XMLHttpRequest (no shim) to speak quack to the native host. Served same-origin
+// as /dist; the host is reached cross-origin (quack server sends CORS *).
+import * as duckdb from '/dist/duckdb-browser.mjs';
+
+const URI = 'quack:localhost:9494';
+const TOKEN = 'super_secret';
+const out = document.getElementById('out');
+const jnum = (_k, v) => (typeof v === 'bigint' ? Number(v) : v);
+
+(async () => {
+  try {
+    const abs = (p) => new URL(p, window.location.href).href;
+    const bundle = await duckdb.selectBundle({
+      eh: { mainModule: abs('/dist/duckdb-eh.wasm'), mainWorker: abs('/dist/duckdb-browser-coi.worker.js') },
+      coi: {
+        mainModule: abs('/dist/duckdb-coi.wasm'),
+        mainWorker: abs('/dist/duckdb-browser-coi.worker.js'),
+        pthreadWorker: abs('/dist/duckdb-browser-coi.pthread.worker.js'),
+      },
+    });
+    const worker = new Worker(bundle.mainWorker);
+    const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    await db.open({ allowUnsignedExtensions: true });
+    const conn = await db.connect();
+
+    await conn.query(`CREATE SECRET quack_secret (TYPE quack, TOKEN '${TOKEN}')`);
+    await conn.query(`ATTACH '${URI}' AS remote`);
+
+    const r = await conn.query('SELECT id, name, price::DOUBLE AS price FROM remote.products ORDER BY id');
+    const rows = r.toArray().map((row) => row.toJSON());
+
+    await conn.query(`CREATE TABLE remote.from_wasm AS SELECT 99 AS magic, 'hello from wasm' AS note`);
+
+    const u = await conn.query(
+      `SELECT * FROM quack_query('${URI}',
+         'SELECT id, name, loyalty_points(price::DOUBLE) AS points FROM products ORDER BY id',
+         token => '${TOKEN}')`
+    );
+    const udfRows = u.toArray().map((row) => row.toJSON());
+
+    await conn.close(); await db.terminate(); worker.terminate();
+    const result = JSON.parse(JSON.stringify({ rows, udfRows }, jnum));
+    out.textContent = JSON.stringify(result, null, 2);
+    window.__quackResult = result;
+  } catch (e) {
+    out.textContent = 'ERROR: ' + (e && e.stack || e);
+    window.__quackError = String(e && e.message || e);
+  }
+})();
+</script>
+</body>
+</html>

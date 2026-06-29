@@ -39,6 +39,7 @@
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/types/vector_buffer.hpp"
 #include "duckdb/common/virtual_file_system.hpp"
+#include "duckdb/function/table/arrow/arrow_duck_schema.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
@@ -51,15 +52,15 @@
 #include "duckdb/web/config.h"
 #include "duckdb/web/csv_insert_options.h"
 #include "duckdb/web/environment.h"
-#include "duckdb/web/extensions/icu_extension.h"
 #include "duckdb/web/extensions/json_extension.h"
 #include "duckdb/web/extensions/parquet_extension.h"
+#include "duckdb/web/extensions/icu_extension.h"
 #include "duckdb/web/extensions/tpcds_extension.h"
 #include "duckdb/web/extensions/tpch_extension.h"
-#include "duckdb/web/extensions/evalexpr_rhai_extension.h"
-#include "duckdb/web/extensions/fts_extension.h"
 #include "duckdb/web/extensions/hash_ext_extension.h"
 #include "duckdb/web/extensions/lua_extension.h"
+#include "duckdb/web/extensions/fts_extension.h"
+#include "duckdb/web/extensions/quack_extension.h"
 #include "duckdb/web/functions/table_function_relation.h"
 #include "duckdb/web/http_wasm.h"
 #include "duckdb/web/io/arrow_ifstream.h"
@@ -86,7 +87,12 @@
 
 namespace duckdb {
 
-bool preloaded_httpfs{true};
+namespace {
+struct PreloadedHttpfsInit {
+    PreloadedHttpfsInit() { preloaded_httpfs = true; }
+} _preloaded_httpfs_init;
+}  // namespace
+
 string web::experimental_s3_tables_global_proxy{""};
 
 namespace web {
@@ -128,7 +134,7 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::MaterializeQuer
     bool lossless_conversion = webdb_.config_->arrow_lossless_conversion;
     ClientProperties options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion,
                              ArrowFormatVersion::V1_0, connection_.context);
-    unordered_map<idx_t, const shared_ptr<ArrowTypeExtensionData>> extension_type_cast;
+    auto extension_type_cast = ArrowTypeExtensionData::GetExtensionTypes(*connection_.context, result->types);
     options.arrow_offset_size = ArrowOffsetSize::REGULAR;
     ArrowConverter::ToArrowSchema(&raw_schema, result->types, result->names, options);
     ARROW_ASSIGN_OR_RAISE(auto schema, arrow::ImportSchema(&raw_schema));
@@ -350,7 +356,7 @@ DuckDBWasmResultsWrapper WebDB::Connection::FetchQueryResults() {
         bool lossless_conversion = webdb_.config_->arrow_lossless_conversion;
         ClientProperties arrow_options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion,
                                        ArrowFormatVersion::V1_0, connection_.context);
-        unordered_map<idx_t, const shared_ptr<ArrowTypeExtensionData>> extension_type_cast;
+        auto extension_type_cast = ArrowTypeExtensionData::GetExtensionTypes(*connection_.context, chunk->GetTypes());
         arrow_options.arrow_offset_size = ArrowOffsetSize::REGULAR;
         ArrowConverter::ToArrowArray(*chunk, &array, arrow_options, extension_type_cast);
         ARROW_ASSIGN_OR_RAISE(auto batch, arrow::ImportRecordBatch(&array, current_schema_));
@@ -975,12 +981,12 @@ arrow::Status WebDB::Open(std::string_view args_json) {
 
         duckdb::DBConfig db_config;
         db_config.file_system = std::move(make_uniq<VirtualFileSystem>(std::move(buffered_fs)));
-        db_config.options.allow_unsigned_extensions = config_->allow_unsigned_extensions;
+        db_config.SetOptionByName("allow_unsigned_extensions", config_->allow_unsigned_extensions);
         db_config.SetOption("arrow_lossless_conversion", config_->arrow_lossless_conversion);
         db_config.options.maximum_threads = config_->maximum_threads;
         db_config.options.use_temporary_directory = false;
         db_config.options.access_mode = access_mode;
-        db_config.options.duckdb_api = "wasm";
+        db_config.SetOptionByName("duckdb_api", "wasm");
         db_config.options.custom_user_agent = config_->custom_user_agent;
         db_config.options.use_direct_io = config_->use_direct_io;
 #ifdef DUCKDB_WASMFS
@@ -997,14 +1003,16 @@ arrow::Status WebDB::Open(std::string_view args_json) {
         auto db = make_shared_ptr<duckdb::DuckDB>(config_->path, &db_config);
 #ifndef WASM_LOADABLE_EXTENSIONS
         duckdb_web_parquet_init(db.get());
+#if defined(DUCKDB_JSON_EXTENSION)
         duckdb_web_json_init(db.get());
+#endif
         duckdb_web_icu_init(db.get());
         duckdb_web_tpcds_init(db.get());
         duckdb_web_tpch_init(db.get());
-        duckdb_web_evalexpr_rhai_init(db.get());
-        duckdb_web_fts_init(db.get());
         duckdb_web_hash_ext_init(db.get());
         duckdb_web_lua_init(db.get());
+        duckdb_web_fts_init(db.get());
+        duckdb_web_quack_init(db.get());
 #endif  // WASM_LOADABLE_EXTENSIONS
         RegisterCustomExtensionOptions(db);
 

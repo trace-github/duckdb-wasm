@@ -46,7 +46,7 @@ esac
 echo "MODE=${MODE}"
 echo "FEATURES=${FEATURES}"
 
-BUILD_DIR="${DUCKDB_WASM_BUILD_PREFIX:-${PROJECT_ROOT}/build}/${MODE}/${FEATURES}"
+BUILD_DIR="${PROJECT_ROOT}/build/${MODE}/${FEATURES}"
 mkdir -p ${BUILD_DIR}
 
 set -x
@@ -96,7 +96,7 @@ sed 's/case \"__table_base\"/case \"getTempRet0\": return getTempRet0;   case \"
 cp ${BUILD_DIR}/beauty_sed.js ${BUILD_DIR}/beauty.js
 cp ${BUILD_DIR}/beauty.js ${BUILD_DIR}/duckdb_wasm.js
 awk '{gsub(/get\(stubs, prop\) \{/,"get(stubs,prop) { if (prop.startsWith(\"invoke_\")) {return createDyncallWrapper(prop.substring(7));}"); print}' ${BUILD_DIR}/beauty.js > ${BUILD_DIR}/beauty2.js
-awk '!(/var .*wasmExports\[/ || /var [_a-z0-9A-Z]+ = Module\[\"[_a-z0-9A-Z]+\"\] = [0-9]+;/) || /var _duckdb_web/ || /var _main/ || /var _calloc/ || /var _malloc/ || /var _free/ || /var _setThrew/ || /var ___cxa/ || /var stack/ || /var ___dl_seterr/ || /var __em/ || /var _em/ || /var _pthread/' ${BUILD_DIR}/beauty2.js > ${BUILD_DIR}/duckdb_wasm.js
+awk '!(/var .*wasmExports\[/ || /var [_a-z0-9A-Z]+ = Module\[\"[_a-z0-9A-Z]+\"\] = [0-9]+;/) || /var _duckdb_web/ || /var _main/ || /var _calloc/ || /var _malloc/ || /var _free/ || /var stack/ || /var ___dl_seterr/ || /var __em/ || /var _em/ || /var _pthread/' ${BUILD_DIR}/beauty2.js > ${BUILD_DIR}/duckdb_wasm.js
 
 cp ${BUILD_DIR}/duckdb_wasm.wasm ${DUCKDB_LIB_DIR}/duckdb${SUFFIX}.wasm
 sed \
@@ -114,12 +114,4 @@ if [ -f ${BUILD_DIR}/duckdb_wasm.worker.js ]; then
   # More info: duckdb-browser-async-coi.pthread.worker.ts
   printf "\nexport const onmessage = self.onmessage;\nexport function getModule() { return Module; }\nexport function setModule(m) { Module = m; }\n" \
     >> ${DUCKDB_LIB_DIR}/duckdb${SUFFIX}.pthread.js
-else
-  # Emscripten 4.x no longer generates a separate pthread worker JS file.
-  # Instead, the main module handles pthread mode when loaded with {name:"em-pthread"}.
-  # The main module sets self.onmessage and self.alert synchronously when
-  # ENVIRONMENT_IS_PTHREAD=true. This stub captures those handlers by requiring
-  # the main JS first (ensuring it evaluates before this stub in the esbuild bundle).
-  printf "// Emscripten 4.x pthread stub\nrequire('./duckdb${SUFFIX}.js');\nvar onmessage = typeof self !== 'undefined' ? self.onmessage : null;\nvar alert = typeof self !== 'undefined' ? self.alert : null;\nvar _module = {};\nfunction getModule() { return _module; }\nfunction setModule(m) { _module = m; }\nmodule.exports = { onmessage: onmessage, alert: alert, getModule: getModule, setModule: setModule };\nmodule.exports.default = module.exports;\n" \
-    > ${DUCKDB_LIB_DIR}/duckdb${SUFFIX}.pthread.js
 fi

@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
-<head><title>DuckDB-WASM hash_ext Test</title></head>
+<head>
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script><title>DuckDB-WASM hash_ext Test</title></head>
 <body>
 <pre id="output">Starting hash_ext test...</pre>
 <script>
@@ -42,28 +43,36 @@ window.onunhandledrejection = function(e) {
 </script>
 <script type="module">
 
-// conn.query() returns raw Arrow IPC bytes.
-// Arrow stores VARCHAR columns as raw UTF-8 in a contiguous buffer,
-// so TextDecoder finds the value. BOOLEAN/INTEGER are binary — cast to VARCHAR in SQL.
-function bufText(buf) {
-  return new TextDecoder().decode(new Uint8Array(buf));
+// conn.query() returns an Arrow Table object.
+// Use table.get(rowIndex).columnName to extract values.
+
+// Extract the first column value from row 0 as a string.
+function extractVal(table) {
+  const row = table.get(0);
+  if (!row) return null;
+  // Get the first field name from the schema
+  const col = table.schema.fields[0].name;
+  const v = row[col];
+  return v == null ? null : String(v);
 }
 
-// Extract the first 16-char lowercase hex string (our hash output).
-function extractHash(buf) {
-  const m = bufText(buf).match(/[0-9a-f]{16}/);
+// Extract a 16-char lowercase hex hash from the first column of row 0.
+function extractHash(table) {
+  const v = extractVal(table);
+  if (!v) return null;
+  const m = v.match(/[0-9a-f]{16}/);
   return m ? m[0] : null;
 }
 
-// Extract a VARCHAR value that should be "true" or "false" (cast in SQL).
-function extractStr(buf) {
-  const text = bufText(buf);
-  // Arrow packs strings with a length prefix; scan for recognisable values
-  if (text.includes('true'))  return 'true';
-  if (text.includes('false')) return 'false';
-  // For numeric strings like "5000" — return the last run of digits
-  const m = text.match(/(\d+)/g);
-  return m ? m[m.length - 1] : null;
+// Extract the value of column 'ok' (or first column) from row 0 as 'true'/'false'/number string.
+function extractStr(table) {
+  const row = table.get(0);
+  if (!row) return null;
+  const col = table.schema.fields[0].name;
+  const v = row[col];
+  if (v == null) return null;
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  return String(v);
 }
 
 async function run() {
@@ -79,36 +88,45 @@ async function run() {
     }
 
     addLog('info', 'Importing module...');
-    const mod = await import('/dist/duckdb-wasm.mjs');
+    const mod = await import('/dist/duckdb-browser.mjs');
     addLog('info', 'Module loaded (' + Object.keys(mod).length + ' exports)');
 
-    const bundleConfig = {
-      mainModule: '/dist/duckdb-coi.wasm',
-      mainWorker: '/dist/duckdb-browser-coi.worker.js',
-      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    const { AsyncDuckDB, selectBundle, ConsoleLogger, createWorker } = mod;
+
+    const DUCKDB_BUNDLES = {
+      eh: {
+        mainModule: new URL('/dist/duckdb-eh.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-eh.worker.js', window.location.href).href,
+      },
+      coi: {
+        mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+        pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+      },
     };
 
-    const { AsyncDuckDB, ConsoleLogger } = mod;
-    const worker = new Worker(bundleConfig.mainWorker);
-    worker.onerror = (e) => {
-      addLog('error', 'Worker error: ' + (e.message || e) + ' at ' + (e.filename || '?') + ':' + (e.lineno || '?'));
-    };
+    addLog('info', 'Selecting bundle...');
+    const bundle = await selectBundle(DUCKDB_BUNDLES);
+    const bundleName = bundle.mainModule.match(/duckdb-(\w+)\.wasm/)[1];
+    addLog('info', 'Selected bundle: ' + bundleName);
 
+    const worker = await createWorker(bundle.mainWorker);
     const logger = new ConsoleLogger();
     db = new AsyncDuckDB(logger, worker);
 
-    addLog('info', 'Instantiating COI bundle...');
-    await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
-    addLog('info', 'COI bundle instantiated');
+    addLog('info', 'Instantiating ' + bundleName + ' bundle...');
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    addLog('info', bundleName + ' bundle instantiated');
 
-    await db.open({ maximumThreads: 4 });
-    addLog('info', 'Database opened (in-memory, 4 threads)');
+    await db.open({});
+    addLog('info', 'Database opened (in-memory)');
 
     let conn = await db.connect();
     addLog('info', 'Connected');
 
-    const vbuf = await conn.query("SELECT version() AS v");
-    const vm = bufText(vbuf).match(/v[\d.]+(-dev\d+)?/);
+    const vResult = await conn.query("SELECT version() AS v");
+    const vStr = String(vResult.get(0).v);
+    const vm = vStr.match(/v[\d.]+(-dev\d+)?/);
     addLog('info', 'DuckDB version: ' + (vm ? vm[0] : 'unknown'));
     _results.push({ label: 'version', value: vm ? vm[0] : 'unknown' });
 
@@ -127,8 +145,7 @@ async function run() {
       }
     }
 
-    // Cast results to VARCHAR so bufText can find them — Arrow stores BOOLEAN/INTEGER as binary.
-    // We use ::VARCHAR on all non-string results.
+    // conn.query() returns Arrow Tables; extractStr reads values directly.
 
     // -------------------------------------------------------------------------
     // Section 1: Known hash values (pre-computed FNV-1a)

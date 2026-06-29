@@ -2,12 +2,12 @@
 #
 # Build duckdb-wasm using Docker.
 #
+# Uses --platform linux/amd64 because Emscripten only ships
+# x86_64 Linux binaries. On Apple Silicon this uses QEMU emulation.
+#
 # Usage:
 #   ./build-wasm.sh              # full build
 #   ./build-wasm.sh --no-cache   # rebuild Docker image from scratch
-#
-# Artifacts end up in their normal locations under build/ and packages/.
-# A Docker volume is used as a ccache to speed up rebuilds.
 #
 set -euo pipefail
 
@@ -22,15 +22,22 @@ if [[ "${1:-}" == "--no-cache" ]]; then
     shift
 fi
 
-echo "=== Building Docker image ==="
-docker build $DOCKER_BUILD_ARGS -t "$IMAGE_NAME" "$ROOT_DIR"
+echo "=== Building Docker image (linux/amd64) ==="
+docker buildx build --platform linux/amd64 $DOCKER_BUILD_ARGS -t "$IMAGE_NAME" --load "$ROOT_DIR"
 
 docker volume create "$CACHE_VOLUME" 2>/dev/null || true
 
 echo "=== Running build ==="
 docker run --rm \
+    --platform linux/amd64 \
     -v "$ROOT_DIR":/src \
     -v "$CACHE_VOLUME":/cache \
     "$IMAGE_NAME"
+
+echo "=== Patching Node bundle ==="
+node "$SCRIPT_DIR/patch-node-bundle.mjs"
+
+echo "=== Patching browser workers (OPFS fix) ==="
+node "$SCRIPT_DIR/patch-browser-workers.mjs"
 
 echo "=== Done ==="

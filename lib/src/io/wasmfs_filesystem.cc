@@ -14,6 +14,9 @@ namespace io {
 
 static constexpr const char *OPFS_PREFIX = "opfs://";
 static constexpr size_t OPFS_PREFIX_LEN = 7;
+// DuckDB internally normalizes opfs:// to opfs:/ (single slash)
+static constexpr const char *OPFS_PREFIX_ALT = "opfs:/";
+static constexpr size_t OPFS_PREFIX_ALT_LEN = 6;
 static constexpr const char *OPFS_MOUNT = "/opfs/";
 
 // --- WasmFSFileHandle ---
@@ -35,14 +38,19 @@ void WasmFSFileHandle::Close() {
 // --- WasmFSFileSystem ---
 
 string WasmFSFileSystem::TranslatePath(const string &path) {
+    // Handle both opfs:// (canonical) and opfs:/ (DuckDB-normalized) forms
     if (path.compare(0, OPFS_PREFIX_LEN, OPFS_PREFIX) == 0) {
         return string(OPFS_MOUNT) + path.substr(OPFS_PREFIX_LEN);
+    }
+    if (path.compare(0, OPFS_PREFIX_ALT_LEN, OPFS_PREFIX_ALT) == 0) {
+        return string(OPFS_MOUNT) + path.substr(OPFS_PREFIX_ALT_LEN);
     }
     return path;
 }
 
 bool WasmFSFileSystem::CanHandleFile(const string &fpath) {
-    return fpath.compare(0, OPFS_PREFIX_LEN, OPFS_PREFIX) == 0;
+    return fpath.compare(0, OPFS_PREFIX_LEN, OPFS_PREFIX) == 0 ||
+           fpath.compare(0, OPFS_PREFIX_ALT_LEN, OPFS_PREFIX_ALT) == 0;
 }
 
 unique_ptr<FileHandle> WasmFSFileSystem::OpenFile(const string &path, FileOpenFlags flags,
@@ -162,10 +170,45 @@ void WasmFSFileSystem::MoveFile(const string &source, const string &target,
                                  optional_ptr<FileOpener> opener) {
     auto src = TranslatePath(source);
     auto dst = TranslatePath(target);
-    if (::rename(src.c_str(), dst.c_str()) != 0) {
-        throw IOException("WasmFSFileSystem: failed to rename '%s' to '%s': %s",
+    if (::rename(src.c_str(), dst.c_str()) == 0) {
+        return;
+    }
+    // OPFS backend may not support rename — fall back to copy + delete
+    int src_fd = ::open(src.c_str(), O_RDONLY);
+    if (src_fd < 0) {
+        throw IOException("WasmFSFileSystem: failed to open source '%s' for move: %s",
+                          source, strerror(errno));
+    }
+    int dst_fd = ::open(dst.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (dst_fd < 0) {
+        ::close(src_fd);
+        throw IOException("WasmFSFileSystem: failed to create target '%s' for move: %s",
+                          target, strerror(errno));
+    }
+    char buf[8192];
+    ssize_t n;
+    while ((n = ::read(src_fd, buf, sizeof(buf))) > 0) {
+        ssize_t written = 0;
+        while (written < n) {
+            ssize_t w = ::write(dst_fd, buf + written, n - written);
+            if (w < 0) {
+                ::close(src_fd);
+                ::close(dst_fd);
+                ::unlink(dst.c_str());
+                throw IOException("WasmFSFileSystem: write failed during move '%s' to '%s': %s",
+                                  source, target, strerror(errno));
+            }
+            written += w;
+        }
+    }
+    ::close(src_fd);
+    ::close(dst_fd);
+    if (n < 0) {
+        ::unlink(dst.c_str());
+        throw IOException("WasmFSFileSystem: read failed during move '%s' to '%s': %s",
                           source, target, strerror(errno));
     }
+    ::unlink(src.c_str());
 }
 
 void WasmFSFileSystem::Truncate(FileHandle &handle, int64_t new_size) {

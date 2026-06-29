@@ -15,7 +15,11 @@ endif()
 set(DUCKDB_CXX_FLAGS "${DUCKDB_CXX_FLAGS} -Wno-unqualified-std-cast-call -DDUCKDB_DEBUG_NO_SAFETY -DDUCKDB_FROM_DUCKDB_WASM")
 message("DUCKDB_CXX_FLAGS=${DUCKDB_CXX_FLAGS}")
 
-set(DUCKDB_EXTENSIONS "json;core_functions;icu;tpcds;tpch")
+# quack is out-of-tree: duckdb 1.5.4 ships .github/config/extensions/quack.cmake,
+# which extension_build_tools.cmake auto-includes for any name in BUILD_EXTENSIONS
+# that has a matching config (pins the GIT_URL/GIT_TAG). On wasm it builds
+# client-only (quack_serve throws NotImplemented; client uses fetch-based HTTPUtil).
+set(DUCKDB_EXTENSIONS "json;parquet;icu;tpcds;tpch;core_functions;quack")
 # Escape semicolons in DUCKDB_EXTENSIONS before passing to ExternalProject_Add
 string(REPLACE ";" "$<SEMICOLON>" DUCKDB_EXTENSIONS_PACKED "${DUCKDB_EXTENSIONS}")
 
@@ -48,24 +52,18 @@ ExternalProject_Add(
              -DDUCKDB_EXPLICIT_PLATFORM=${DUCKDB_EXPLICIT_PLATFORM}
              -DSMALLER_BINARY=1
   BUILD_BYPRODUCTS
-    <INSTALL_DIR>/lib/libduckdb_re2.a
-    <INSTALL_DIR>/lib/libduckdb_zstd.a
     <INSTALL_DIR>/lib/libduckdb_static.a
     <INSTALL_DIR>/lib/libduckdb_fmt.a
-    <INSTALL_DIR>/lib/libduckdb_fsst.a
-    <INSTALL_DIR>/lib/libduckdb_hyperloglog.a
-    <INSTALL_DIR>/lib/libduckdb_miniz.a
-    <INSTALL_DIR>/lib/libduckdb_mbedtls.a
-    <INSTALL_DIR>/lib/libduckdb_yyjson.a
-    <INSTALL_DIR>/lib/libduckdb_pg_query.a
     <INSTALL_DIR>/lib/libduckdb_utf8proc.a
     <INSTALL_DIR>/lib/libduckdb_fastpforlib.a
     <INSTALL_DIR>/lib/libparquet_extension.a
     <INSTALL_DIR>/lib/libcore_functions_extension.a
+    <INSTALL_DIR>/lib/libduckdb_generated_extension_loader.a
     <INSTALL_DIR>/lib/libjson_extension.a
     <INSTALL_DIR>/lib/libicu_extension.a
     <INSTALL_DIR>/lib/libtpcds_extension.a
-    <INSTALL_DIR>/lib/libtpch_extension.a)
+    <INSTALL_DIR>/lib/libtpch_extension.a
+    <INSTALL_DIR>/lib/libquack_extension.a)
 
 ExternalProject_Get_Property(duckdb_ep install_dir)
 ExternalProject_Get_Property(duckdb_ep binary_dir)
@@ -85,18 +83,11 @@ set_property(TARGET duckdb PROPERTY IMPORTED_LOCATION ${DUCKDB_LIBRARY_PATH})
 
 target_link_libraries(
   duckdb
-  INTERFACE ${install_dir}/lib/libduckdb_re2.a
-  INTERFACE ${install_dir}/lib/libduckdb_zstd.a
-  INTERFACE ${install_dir}/lib/libduckdb_fmt.a
-  INTERFACE ${install_dir}/lib/libduckdb_fsst.a
-  INTERFACE ${install_dir}/lib/libduckdb_hyperloglog.a
-  INTERFACE ${install_dir}/lib/libduckdb_miniz.a
-  INTERFACE ${install_dir}/lib/libduckdb_mbedtls.a
-  INTERFACE ${install_dir}/lib/libduckdb_yyjson.a
-  INTERFACE ${install_dir}/lib/libduckdb_pg_query.a
-  INTERFACE ${install_dir}/lib/libduckdb_utf8proc.a
-  INTERFACE ${install_dir}/lib/libduckdb_fastpforlib.a
+#  INTERFACE ${install_dir}/lib/libduckdb_fmt.a
+#  INTERFACE ${install_dir}/lib/libduckdb_utf8proc.a
+#  INTERFACE ${install_dir}/lib/libduckdb_fastpforlib.a
   INTERFACE ${install_dir}/lib/libcore_functions_extension.a
+  INTERFACE ${install_dir}/lib/libduckdb_generated_extension_loader.a
   INTERFACE dl)
 
 target_include_directories(
@@ -122,7 +113,7 @@ target_include_directories(duckdb_json INTERFACE ${DUCKDB_SOURCE_DIR}/extension/
 
 add_library(duckdb_core_functions STATIC IMPORTED)
 set_property(TARGET duckdb_core_functions PROPERTY IMPORTED_LOCATION ${install_dir}/lib/libcore_functions_extension.a)
-target_include_directories(duckdb_core_functions INTERFACE ${DUCKDB_SOURCE_DIR}/extension/core_functions/include)
+target_include_directories(duckdb_core_functions INTERFACE ${DUCKDB_SOURCE_DIR}/extension/json/include)
 
 add_library(duckdb_icu STATIC IMPORTED)
 set_property(TARGET duckdb_icu PROPERTY IMPORTED_LOCATION ${install_dir}/lib/libicu_extension.a)
@@ -136,9 +127,15 @@ add_library(duckdb_tpch STATIC IMPORTED)
 set_property(TARGET duckdb_tpch PROPERTY IMPORTED_LOCATION ${install_dir}/lib/libtpch_extension.a)
 target_include_directories(duckdb_tpch INTERFACE ${DUCKDB_SOURCE_DIR}/extension/tpch/include)
 
+# quack — out-of-tree, built by the duckdb ExternalProject (see DUCKDB_EXTENSIONS).
+# Loaded by name via the generated extension loader, so no include dir is needed.
+add_library(duckdb_quack STATIC IMPORTED)
+set_property(TARGET duckdb_quack PROPERTY IMPORTED_LOCATION ${install_dir}/lib/libquack_extension.a)
+
 add_dependencies(duckdb duckdb_ep)
 add_dependencies(duckdb_parquet duckdb_ep)
 add_dependencies(duckdb_json duckdb_ep)
 add_dependencies(duckdb_icu duckdb_ep)
 add_dependencies(duckdb_tpcds duckdb_ep)
 add_dependencies(duckdb_tpch duckdb_ep)
+add_dependencies(duckdb_quack duckdb_ep)

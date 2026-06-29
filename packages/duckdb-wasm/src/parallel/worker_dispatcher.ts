@@ -136,18 +136,9 @@ export abstract class AsyncDuckDBDispatcher implements Logger {
 
                 case WorkerRequestType.OPEN: {
                     const path = request.data.path;
-                    const hasWasmFS = !!(this._bindings!.getFeatureFlags() & DuckDBFeature.WASM_THREADS);
+                    const hasWasmFS = !!(this._bindings!.getFeatureFlags() & DuckDBFeature.WASMFS);
                     if (path?.startsWith('opfs://') && !hasWasmFS) {
-                        // Only prepare sync access handles in JS (_preparedHandles) without
-                        // registering in C++ files_by_name_. This avoids FileExists() returning
-                        // true for empty OPFS files, which would cause DuckDB to try loading
-                        // an existing database from an empty file. The C++ OpenFile flow will
-                        // discover the handles via the JS openFile callback.
-                        // Skip when WasmFS is active: WasmFS handles OPFS via POSIX I/O directly.
-                        const runtime = globalThis.DUCKDB_RUNTIME;
-                        if (runtime?.prepareDBFileHandle) {
-                            await runtime.prepareDBFileHandle(path, DuckDBDataProtocol.BROWSER_FSACCESS);
-                        }
+                        await this._bindings.prepareDBFileHandle(path, DuckDBDataProtocol.BROWSER_FSACCESS);
                         request.data.useDirectIO = true;
                     }
                     this._bindings.open(request.data);
@@ -371,10 +362,14 @@ export abstract class AsyncDuckDBDispatcher implements Logger {
                     this.sendOK(request);
                     break;
 
-                case WorkerRequestType.REGISTER_OPFS_FILE_NAME:
-                    await this._bindings.registerOPFSFileName(request.data[0]);
+                case WorkerRequestType.REGISTER_OPFS_FILE_NAME: {
+                    const hasWasmFS = !!(this._bindings!.getFeatureFlags() & DuckDBFeature.WASMFS);
+                    if (!hasWasmFS) {
+                        await this._bindings.registerOPFSFileName(request.data[0]);
+                    }
                     this.sendOK(request);
                     break;
+                }
 
                 case WorkerRequestType.EXPORT_FILE_STATISTICS: {
                     this.postMessage(

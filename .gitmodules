@@ -1,6 +1,7 @@
 [submodule "submodules/duckdb"]
 	path = submodules/duckdb
 	url = https://github.com/duckdb/duckdb
+	update = rebase
 [submodule "submodules/arrow"]
 	path = submodules/arrow
 	url = https://github.com/apache/arrow
@@ -31,9 +32,6 @@
 	url = https://github.com/gregrahn/tpch-kit.git
 	ignore = dirty
 	shallow = true
-[submodule "submodules/evalexpr_rhai"]
-	path = submodules/evalexpr_rhai
-	url = https://github.com/query-farm/evalexpr_rhai.git
 [submodule "submodules/duckdb_lua"]
 	path = submodules/duckdb_lua
 	url = https://github.com/isaacbrodsky/duckdb-lua.git

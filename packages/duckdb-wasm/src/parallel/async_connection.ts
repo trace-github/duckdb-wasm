@@ -1,3 +1,4 @@
+import * as arrow from 'apache-arrow';
 import { AsyncDuckDB } from './async_bindings';
 import { LogLevel, LogTopic, LogOrigin, LogEvent } from '../log';
 import { ArrowInsertOptions, CSVInsertOptions, JSONInsertOptions } from '../bindings/insert_options';
@@ -30,7 +31,7 @@ export class AsyncDuckDBConnection {
     }
 
     /** Run a query */
-    public query(text: string): Promise<Uint8Array> {
+    public async query<T extends { [key: string]: arrow.DataType } = any>(text: string): Promise<arrow.Table<T>> {
         this._bindings.logger.log({
             timestamp: new Date(),
             level: LogLevel.INFO,
@@ -39,14 +40,18 @@ export class AsyncDuckDBConnection {
             event: LogEvent.RUN,
             value: text,
         });
-        return this._bindings.runQuery(this._conn, text);
+        const buffer = await this._bindings.runQuery(this._conn, text);
+        const reader = arrow.RecordBatchReader.from<T>(buffer);
+        console.assert(reader.isSync(), 'Reader is not sync');
+        console.assert(reader.isFile(), 'Reader is not file');
+        return new arrow.Table(reader as arrow.RecordBatchFileReader);
     }
 
     /** Send a query */
-    public async send(
+    public async send<T extends { [key: string]: arrow.DataType } = any>(
         text: string,
         allowStreamResult: boolean = false,
-    ): Promise<AsyncIterable<Uint8Array>> {
+    ): Promise<arrow.AsyncRecordBatchStreamReader<T>> {
         this._bindings.logger.log({
             timestamp: new Date(),
             level: LogLevel.INFO,
@@ -64,7 +69,11 @@ export class AsyncDuckDBConnection {
             }
             header = await this._bindings.pollPendingQuery(this._conn);
         }
-        return new AsyncResultStreamIterator(this._bindings, this._conn, header);
+        const iter = new AsyncResultStreamIterator(this._bindings, this._conn, header);
+        const reader = await arrow.RecordBatchReader.from<T>(iter);
+        console.assert(reader.isAsync());
+        console.assert(reader.isStream());
+        return reader as unknown as arrow.AsyncRecordBatchStreamReader<T>; // XXX
     }
 
     /** Cancel a query that was sent earlier */
@@ -78,13 +87,18 @@ export class AsyncDuckDBConnection {
     }
 
     /** Create a prepared statement */
-    public async prepare(
+    public async prepare<T extends { [key: string]: arrow.DataType } = any>(
         text: string,
-    ): Promise<AsyncPreparedStatement> {
+    ): Promise<AsyncPreparedStatement<T>> {
         const stmt = await this._bindings.createPrepared(this._conn, text);
-        return new AsyncPreparedStatement(this._bindings, this._conn, stmt);
+        return new AsyncPreparedStatement<T>(this._bindings, this._conn, stmt);
     }
 
+    /** Insert an arrow table */
+    public async insertArrowTable(table: arrow.Table, options: ArrowInsertOptions): Promise<void> {
+        const buffer = arrow.tableToIPC(table, 'stream');
+        await this.insertArrowFromIPCStream(buffer, options);
+    }
     /** Insert an arrow table from an ipc stream */
     public async insertArrowFromIPCStream(buffer: Uint8Array, options: ArrowInsertOptions): Promise<void> {
         await this._bindings.insertArrowFromIPCStream(this._conn, buffer, options);
@@ -153,7 +167,7 @@ export class AsyncResultStreamIterator implements AsyncIterable<Uint8Array> {
 }
 
 /** A thin helper to bind the prepared statement id */
-export class AsyncPreparedStatement {
+export class AsyncPreparedStatement<T extends { [key: string]: arrow.DataType } = any> {
     /** The bindings */
     protected readonly bindings: AsyncDuckDB;
     /** The connection id */
@@ -174,13 +188,21 @@ export class AsyncPreparedStatement {
     }
 
     /** Run a prepared statement */
-    public query(...params: any[]): Promise<Uint8Array> {
-        return this.bindings.runPrepared(this.connectionId, this.statementId, params);
+    public async query(...params: any[]): Promise<arrow.Table<T>> {
+        const buffer = await this.bindings.runPrepared(this.connectionId, this.statementId, params);
+        const reader = arrow.RecordBatchReader.from<T>(buffer);
+        console.assert(reader.isSync());
+        console.assert(reader.isFile());
+        return new arrow.Table(reader as arrow.RecordBatchFileReader);
     }
 
     /** Send a prepared statement */
-    public async send(...params: any[]): Promise<AsyncIterable<Uint8Array>> {
+    public async send(...params: any[]): Promise<arrow.AsyncRecordBatchStreamReader<T>> {
         const header = await this.bindings.sendPrepared(this.connectionId, this.statementId, params);
-        return new AsyncResultStreamIterator(this.bindings, this.connectionId, header);
+        const iter = new AsyncResultStreamIterator(this.bindings, this.connectionId, header);
+        const reader = await arrow.RecordBatchReader.from<T>(iter);
+        console.assert(reader.isAsync());
+        console.assert(reader.isStream());
+        return reader as unknown as arrow.AsyncRecordBatchStreamReader<T>; // XXX
     }
 }

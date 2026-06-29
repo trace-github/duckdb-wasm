@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
-<head><title>DuckDB-WASM OPFS Parquet Stress Test (5 threads)</title></head>
+<head>
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script><title>DuckDB-WASM OPFS Parquet Stress Test (5 threads)</title></head>
 <body>
 <pre id="output">Starting OPFS parquet stress test...</pre>
 <script>
@@ -51,18 +52,16 @@ setTimeout(function() {
 
 // --- Helpers ---
 
-function bufText(buf) {
-  return new TextDecoder().decode(new Uint8Array(buf));
+// conn.query() returns an Arrow Table. Extract first column of first row as a number.
+function getFirstInt(table) {
+  const row = table.get(0);
+  if (!row) return null;
+  const col = table.schema.fields[0].name;
+  return Number(row[col]);
 }
 
-function findInt32InArrow(buf, target) {
-  const bytes = new Uint8Array(buf);
-  const abuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  const view = new DataView(abuf);
-  for (let i = 0; i <= bytes.length - 4; i++) {
-    if (view.getInt32(i, true) === target) return true;
-  }
-  return false;
+function checkIntEquals(table, target) {
+  return getFirstInt(table) === target;
 }
 
 async function cleanOPFS(prefix) {
@@ -125,15 +124,26 @@ async function run() {
     addLog('info', 'OPFS after clean: ' + (priorFiles.length ? priorFiles.join(', ') : '(empty)'));
 
     addLog('info', 'Importing module...');
-    const mod = await import('/dist/duckdb-wasm.mjs');
-    const { AsyncDuckDB, ConsoleLogger } = mod;
+    const mod = await import('/dist/duckdb-browser.mjs');
+    const { AsyncDuckDB, selectBundle, ConsoleLogger, createWorker } = mod;
     addLog('info', 'Module loaded');
 
-    const bundleConfig = {
-      mainModule: '/dist/duckdb-coi.wasm',
-      mainWorker: '/dist/duckdb-browser-coi.worker.js',
-      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    const DUCKDB_BUNDLES = {
+      eh: {
+        mainModule: new URL('/dist/duckdb-eh.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-eh.worker.js', window.location.href).href,
+      },
+      coi: {
+        mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+        pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+      },
     };
+
+    addLog('info', 'Selecting bundle...');
+    const bundle = await selectBundle(DUCKDB_BUNDLES);
+    const bundleName = bundle.mainModule.match(/duckdb-(\w+)\.wasm/)[1];
+    addLog('info', 'Selected bundle: ' + bundleName);
 
     const logger = new ConsoleLogger();
 
@@ -152,10 +162,9 @@ async function run() {
 
     // Phase 1a: Use temporary DuckDB to generate parquet buffers only
     {
-      const tmpWorker = new Worker(bundleConfig.mainWorker);
-      tmpWorker.onerror = (e) => addLog('error', 'tmpWorker error: ' + (e.message || e));
+      const tmpWorker = await createWorker(bundle.mainWorker);
       const tmpDb = new AsyncDuckDB(logger, tmpWorker);
-      await tmpDb.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+      await tmpDb.instantiate(bundle.mainModule, bundle.pthreadWorker);
       await tmpDb.open({ path: ':memory:' });
       const tmpConn = await tmpDb.connect();
 
@@ -199,10 +208,9 @@ async function run() {
     addLog('info', 'OPFS files: ' + opfsFiles.join(', '));
 
     // Phase 2: Open real OPFS DB, register parquet files
-    const worker = new Worker(bundleConfig.mainWorker);
-    worker.onerror = (e) => addLog('error', 'Worker error: ' + (e.message || e));
+    const worker = await createWorker(bundle.mainWorker);
     db = new AsyncDuckDB(logger, worker);
-    await db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
     await db.open({
       path: 'opfs://' + dbName,
       accessMode: 3, // READ_WRITE
@@ -220,7 +228,7 @@ async function run() {
     // Use ONE connection for all read tests to avoid worker state issues
     const conn = await db.connect();
     const tResult = await conn.query("SELECT current_setting('threads')::INTEGER AS t");
-    addLog('info', 'Threads setting: ' + bufText(tResult).replace(/[^\x20-\x7E]/g, ''));
+    addLog('info', 'Threads setting: ' + Number(tResult.get(0).t));
     _results.push({ label: 'write_parquet', value: NUM_PARQUET + ' files (' + ROWS + ' rows each)' });
 
     // =============================================
@@ -233,7 +241,7 @@ async function run() {
         conn.query("SELECT count(*)::INTEGER AS n FROM read_parquet('" + parquetFiles[i] + "')"),
         15000, 'T2 read ' + i
       );
-      if (!findInt32InArrow(r, ROWS)) {
+      if (!checkIntEquals(r, ROWS)) {
         throw new Error('Test 2: parquet ' + i + ' count mismatch (expected ' + ROWS + ')');
       }
     }
@@ -253,7 +261,7 @@ async function run() {
     ];
     for (let i = 0; i < queries3.length; i++) {
       const r = await withTimeout(conn.query(queries3[i]), 15000, 'T3 q' + i);
-      if (!findInt32InArrow(r, ROWS)) throw new Error('Test 3: read ' + i + ' count mismatch');
+      if (!checkIntEquals(r, ROWS)) throw new Error('Test 3: read ' + i + ' count mismatch');
     }
     addLog('info', 'Test 3 PASS: 4 reads (2 on same file) (' + (Date.now() - t3) + 'ms)');
     _results.push({ label: 'multi_read_shared', value: 'OK (' + (Date.now() - t3) + 'ms)' });
@@ -278,7 +286,7 @@ async function run() {
         conn.query("SELECT count(*)::INTEGER AS n FROM read_parquet('" + bufRound + "')"),
         15000, 'T4 read r' + round
       );
-      if (r1.byteLength < 10) throw new Error('Test 4: round ' + round + ' read returned empty');
+      if (r1.numRows < 1) throw new Error('Test 4: round ' + round + ' read returned empty');
       addLog('info', 'Round ' + round + ' OK');
     }
     addLog('info', 'Test 4 PASS: ' + ROUNDS + ' read/write rounds (' + (Date.now() - t4) + 'ms)');
@@ -298,7 +306,7 @@ async function run() {
           "FROM read_parquet('" + file + "') WHERE category >= " + (i % 5)
         ), 15000, 'T5 agg ' + i
       );
-      if (r.byteLength < 10) throw new Error('Test 5: agg query ' + i + ' returned empty');
+      if (r.numRows < 1) throw new Error('Test 5: agg query ' + i + ' returned empty');
     }
     addLog('info', 'T5: 8 aggregate queries done');
 
@@ -308,7 +316,8 @@ async function run() {
         conn.query("SELECT * FROM read_parquet('" + scanFiles[i] + "') LIMIT 100"),
         15000, 'T5 scan ' + i
       );
-      if (!bufText(r).includes('name_')) throw new Error('Test 5: scan ' + i + ' missing data');
+      const scanVal = String(r.get(0).name);
+      if (!scanVal.includes('name_')) throw new Error('Test 5: scan ' + i + ' missing data, got: ' + scanVal);
     }
     addLog('info', 'Test 5 PASS: 8 agg + 4 SELECT * scans (' + (Date.now() - t5) + 'ms)');
     _results.push({ label: 'heavy_reads', value: 'OK (' + (Date.now() - t5) + 'ms)' });
@@ -323,7 +332,7 @@ async function run() {
       conn.query("SELECT count(*)::INTEGER AS n FROM read_parquet('" + parquetFiles[0] + "')"),
       15000, 'T6 pre-close'
     );
-    if (!findInt32InArrow(preCloseResult, ROWS)) throw new Error('Test 6: pre-close count mismatch');
+    if (!checkIntEquals(preCloseResult, ROWS)) throw new Error('Test 6: pre-close count mismatch');
     await conn.close();
 
     // Close everything and wait for OPFS handles to release
@@ -337,10 +346,9 @@ async function run() {
     addLog('info', 'OPFS after terminate: ' + postFiles.join(', '));
 
     // Reopen
-    const worker2 = new Worker(bundleConfig.mainWorker);
-    worker2.onerror = (e) => addLog('error', 'Worker2 error: ' + (e.message || e));
+    const worker2 = await createWorker(bundle.mainWorker);
     db = new AsyncDuckDB(logger, worker2);
-    await withTimeout(db.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker), 30000, 'T6instantiate');
+    await withTimeout(db.instantiate(bundle.mainModule, bundle.pthreadWorker), 30000, 'T6instantiate');
 
     // Reopen as :memory: (OPFS DB file SyncAccessHandle isn't released immediately)
     // Testing that OPFS parquet files persist, not the DB file itself
@@ -356,7 +364,7 @@ async function run() {
     const postResult = await withTimeout(conn6b.query(
       "SELECT count(*)::INTEGER AS n FROM read_parquet('" + parquetFiles[0] + "')"
     ), 15000, 'T6query');
-    if (!findInt32InArrow(postResult, ROWS)) {
+    if (!checkIntEquals(postResult, ROWS)) {
       throw new Error('Test 6: post-reopen count mismatch (expected ' + ROWS + ')');
     }
     addLog('info', 'Test 6 PASS: OPFS parquet data persisted across restart');

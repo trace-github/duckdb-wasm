@@ -1,0 +1,33 @@
+# Builder image for linux/amd64 native extension builds.
+#
+# On Apple Silicon Macs, Docker runs amd64 containers via QEMU emulation.
+# QEMU clock skew causes Debian APT GPG signature verification to fail,
+# so we disable signature checking here. This is safe for a build-only
+# container that never runs in production.
+#
+# Build:  docker buildx build --platform linux/amd64 -t duckdb-wasm-builder:amd64 --load -f Dockerfile.amd64 .
+# Usage:  see extensions/hash_ext/build-all.sh
+FROM --platform=linux/amd64 debian:bookworm-slim
+
+# Workaround: disable APT signature checks (QEMU clock skew)
+RUN apt-get -o Acquire::Check-Valid-Until=false \
+            -o Acquire::AllowInsecureRepositories=true \
+            -o Acquire::AllowDowngradeToInsecureRepositories=true \
+            update --allow-insecure-repositories || true && \
+    apt-get -o APT::Get::AllowUnauthenticated=true \
+            install -y --allow-unauthenticated --no-install-recommends \
+    build-essential cmake ccache git python3 ca-certificates curl wget xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust nightly
+ENV RUSTUP_HOME=/opt/rustup
+ENV CARGO_HOME=/opt/cargo
+ENV PATH="$CARGO_HOME/bin:$PATH"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+    -y --default-toolchain nightly --profile minimal \
+    && rustup component add rust-src --toolchain nightly
+
+ENV CCACHE_DIR=/cache/ccache
+ENV CCACHE_MAXSIZE=5G
+
+WORKDIR /src

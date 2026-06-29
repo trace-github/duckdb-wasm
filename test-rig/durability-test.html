@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script><title>DuckDB-WASM Durability + Adversarial Tests (COI)</title></head>
+<body>
+<pre id="output">Starting durability tests (COI only)...</pre>
+<script>
+var _logs = [];
+var _results = [];
+var _reported = false;
+
+function addLog(level, msg) {
+  _logs.push({ level: level, message: msg });
+  document.getElementById('output').textContent += '\n[' + level.toUpperCase() + '] ' + msg;
+  if (level === 'error') console.error(msg);
+  else console.log(msg);
+}
+
+function sendReport(status, extra) {
+  if (_reported) return;
+  _reported = true;
+  var payload = Object.assign({
+    status: status,
+    crossOriginIsolated: self.crossOriginIsolated,
+    logs: _logs,
+    results: _results
+  }, extra || {});
+  document.getElementById('output').textContent += '\n\n=== REPORT: ' + status + ' ===';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/report', false);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send(JSON.stringify(payload));
+}
+
+window.onerror = function(msg, src, line, col, err) {
+  addLog('error', 'Global error: ' + msg + ' at ' + src + ':' + line);
+  sendReport('FAIL', { error: msg, stack: err?.stack || '' });
+};
+window.onunhandledrejection = function(e) {
+  addLog('error', 'Unhandled rejection: ' + (e.reason?.message || e.reason));
+  sendReport('FAIL', { error: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' });
+};
+
+setTimeout(function() {
+  addLog('error', 'SAFETY TIMEOUT: no report after 240s');
+  sendReport('FAIL', { error: 'Safety timeout - test hung', elapsed: 240000 });
+}, 240000);
+</script>
+<script type="module">
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT after ' + ms + 'ms in: ' + label)), ms))
+  ]);
+}
+
+function getFirstInt(table) {
+  const row = table.get(0);
+  if (!row) return null;
+  const col = table.schema.fields[0].name;
+  return Number(row[col]);
+}
+
+async function cleanOPFS(prefix) {
+  try {
+    const root = await navigator.storage.getDirectory();
+    for await (const [name] of root.entries()) {
+      if (name.startsWith(prefix)) {
+        try { await root.removeEntry(name); } catch (e) { /* locked */ }
+      }
+    }
+  } catch (e) { /* */ }
+}
+
+async function listOPFS(prefix) {
+  const entries = [];
+  try {
+    const root = await navigator.storage.getDirectory();
+    for await (const [name, handle] of root.entries()) {
+      if (!prefix || name.startsWith(prefix)) {
+        let size = '?';
+        if (handle.kind === 'file') {
+          try { const f = await handle.getFile(); size = f.size; } catch (e) { size = 'locked'; }
+        }
+        entries.push({ name, size });
+      }
+    }
+  } catch (e) { /* */ }
+  return entries;
+}
+
+const BUNDLE = {
+  mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+  mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+  pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+};
+
+let mod;
+
+async function makeDB(prefix, threads = 4) {
+  const { AsyncDuckDB, ConsoleLogger, createWorker } = mod;
+  const logger = new ConsoleLogger();
+  const worker = await createWorker(BUNDLE.mainWorker);
+  const db = new AsyncDuckDB(logger, worker);
+  await db.instantiate(BUNDLE.mainModule, BUNDLE.pthreadWorker);
+  await db.open({
+    path: 'opfs://' + prefix + '.db',
+    accessMode: 3,
+    maximumThreads: threads,
+  });
+  return db;
+}
+
+// =========================================================================
+// Test 1: Memory pressure — register large buffers while querying
+//
+// Forces WASM memory growth under concurrent load. If buffer views get
+// detached mid-copy, this throws TypeError on .set().
+// =========================================================================
+async function test1_memoryPressure(RUN_ID) {
+  addLog('info', '=== Test 1: Memory pressure — large buffer registration under load ===');
+  const t0 = Date.now();
+  const PREFIX = 'dur1_' + RUN_ID;
+  const db = await makeDB(PREFIX, 4);
+  const conn = await db.connect();
+
+  // Create a base table to query against
+  await conn.query(`CREATE TABLE pressure AS SELECT i, repeat('x', 200) AS payload FROM generate_series(1, 50000) t(i)`);
+
+  // Register several large CSV buffers while running queries
+  const BIG = 512 * 1024; // 512KB each
+  const ROUNDS = 10;
+  for (let r = 0; r < ROUNDS; r++) {
+    // Build a CSV buffer
+    let csv = 'id,val\n';
+    for (let i = 0; i < 2000; i++) {
+      csv += i + ',' + 'x'.repeat(200) + '\n';
+    }
+    const buf = new TextEncoder().encode(csv);
+
+    // Register the buffer (this does malloc + HEAPU8 view + set)
+    const fname = PREFIX + '_buf_' + r + '.csv';
+    await db.registerFileBuffer(fname, buf);
+
+    // Simultaneously query (forces WASM to work while we registered)
+    const count = getFirstInt(await conn.query('SELECT count(*) FROM pressure WHERE i > ' + (r * 5000)));
+    if (count === null || count <= 0) throw new Error('Round ' + r + ': unexpected count ' + count);
+  }
+
+  // Verify everything is coherent
+  const finalCount = getFirstInt(await conn.query('SELECT count(*) FROM pressure'));
+  if (finalCount !== 50000) throw new Error('Expected 50000, got ' + finalCount);
+
+  await conn.close();
+  await db.terminate();
+  await cleanOPFS(PREFIX);
+
+  const elapsed = Date.now() - t0;
+  addLog('info', 'Test 1 PASS: ' + ROUNDS + ' large buffer registrations under query load (' + elapsed + 'ms)');
+  _results.push({ key: 'memory_pressure', value: 'PASS (' + elapsed + 'ms)' });
+}
+
+// =========================================================================
+// Test 2: Glob on OPFS — verify wildcard reads fail loudly or work
+//
+// Writes N parquet files, then tries SELECT * FROM 'opfs://prefix_*.parquet'.
+// Must not silently return 0 rows.
+// =========================================================================
+async function test2_globBehavior(RUN_ID) {
+  addLog('info', '=== Test 2: Glob pattern behavior on OPFS ===');
+  const t0 = Date.now();
+  const PREFIX = 'dur2_' + RUN_ID;
+  const db = await makeDB(PREFIX, 4);
+  const conn = await db.connect();
+
+  // Write 3 parquet files
+  const FILES = 3;
+  const ROWS = 100;
+  for (let i = 0; i < FILES; i++) {
+    await conn.query(`COPY (SELECT ${i} AS file_id, j AS row_id FROM generate_series(1,${ROWS}) t(j)) TO 'opfs://${PREFIX}_data_${i}.parquet' (FORMAT PARQUET)`);
+  }
+
+  // Verify individual reads work
+  for (let i = 0; i < FILES; i++) {
+    const n = getFirstInt(await conn.query(`SELECT count(*) FROM 'opfs://${PREFIX}_data_${i}.parquet'`));
+    if (n !== ROWS) throw new Error('Individual read file ' + i + ': expected ' + ROWS + ', got ' + n);
+  }
+
+  // Try glob pattern — this may fail (WasmFS Glob is not implemented for wildcards)
+  let globResult = 'not_tested';
+  try {
+    const n = getFirstInt(await conn.query(`SELECT count(*) FROM 'opfs://${PREFIX}_data_*.parquet'`));
+    if (n === FILES * ROWS) {
+      globResult = 'works (' + n + ' rows)';
+    } else if (n === 0) {
+      globResult = 'SILENT_FAILURE (0 rows — glob returned nothing)';
+    } else {
+      globResult = 'partial (' + n + ' rows, expected ' + (FILES * ROWS) + ')';
+    }
+  } catch (e) {
+    // An error is acceptable — better than silent 0 rows
+    globResult = 'error: ' + e.message.substring(0, 120);
+  }
+
+  addLog('info', 'Glob result: ' + globResult);
+
+  // The explicit-file approach must always work as a fallback
+  const unionQuery = Array.from({length: FILES}, (_, i) =>
+    `SELECT * FROM 'opfs://${PREFIX}_data_${i}.parquet'`
+  ).join(' UNION ALL ');
+  const totalExplicit = getFirstInt(await conn.query('SELECT count(*) FROM (' + unionQuery + ')'));
+  if (totalExplicit !== FILES * ROWS) {
+    throw new Error('Explicit union read: expected ' + (FILES * ROWS) + ', got ' + totalExplicit);
+  }
+
+  await conn.close();
+  await db.terminate();
+  await cleanOPFS(PREFIX);
+
+  const elapsed = Date.now() - t0;
+  addLog('info', 'Test 2 PASS: glob behavior documented, explicit reads verified (' + elapsed + 'ms)');
+  _results.push({ key: 'glob_behavior', value: globResult });
+  _results.push({ key: 'explicit_reads', value: 'PASS' });
+}
+
+// =========================================================================
+// Test 3: Checkpoint stress — repeated WAL→DB flush via copy-delete fallback
+//
+// OPFS doesn't support rename(), so every CHECKPOINT copies the entire WAL.
+// Verifies data integrity across many checkpoint cycles and that the
+// copy-delete fallback doesn't corrupt data.
+// =========================================================================
+async function test3_checkpointStress(RUN_ID) {
+  addLog('info', '=== Test 3: Checkpoint stress — 20 write+checkpoint cycles ===');
+  const t0 = Date.now();
+  const PREFIX = 'dur3_' + RUN_ID;
+  const db = await makeDB(PREFIX, 1); // single thread avoids checkpoint deadlock
+  const conn = await db.connect();
+
+  await conn.query("SET wal_autocheckpoint = '1TB'"); // manual checkpoints only
+  await conn.query('CREATE TABLE ckpt_data (cycle INT, payload VARCHAR)');
+
+  const CYCLES = 20;
+  const ROWS_PER = 5000;
+  let expectedTotal = 0;
+
+  for (let c = 0; c < CYCLES; c++) {
+    // Insert a batch
+    await conn.query(`INSERT INTO ckpt_data SELECT ${c}, repeat('c', 100 + (i % 200)) FROM generate_series(1, ${ROWS_PER}) t(i)`);
+    expectedTotal += ROWS_PER;
+
+    // Force checkpoint — triggers MoveFile (copy+delete fallback on OPFS)
+    await conn.query('CHECKPOINT');
+
+    // Verify row count after checkpoint
+    const count = getFirstInt(await conn.query('SELECT count(*) FROM ckpt_data'));
+    if (count !== expectedTotal) {
+      throw new Error('Cycle ' + c + ' after CHECKPOINT: expected ' + expectedTotal + ', got ' + count);
+    }
+  }
+
+  // Final integrity: verify all cycles present
+  const cycleCount = getFirstInt(await conn.query('SELECT count(DISTINCT cycle) FROM ckpt_data'));
+  if (cycleCount !== CYCLES) {
+    throw new Error('Expected ' + CYCLES + ' distinct cycles, got ' + cycleCount);
+  }
+
+  const finalCount = getFirstInt(await conn.query('SELECT count(*) FROM ckpt_data'));
+  if (finalCount !== expectedTotal) {
+    throw new Error('Final count: expected ' + expectedTotal + ', got ' + finalCount);
+  }
+
+  // Check OPFS — after checkpoint, WAL should be small or absent
+  const files = await listOPFS(PREFIX);
+  const dbFile = files.find(f => f.name.endsWith('.db'));
+  const walFile = files.find(f => f.name.endsWith('.wal'));
+  addLog('info', 'After ' + CYCLES + ' checkpoints: db=' + (dbFile ? dbFile.size + 'B' : 'missing') +
+    ', wal=' + (walFile ? walFile.size + 'B' : 'none'));
+
+  await conn.close();
+  await db.terminate();
+  await cleanOPFS(PREFIX);
+
+  const elapsed = Date.now() - t0;
+  addLog('info', 'Test 3 PASS: ' + CYCLES + ' checkpoint cycles, ' + finalCount + ' total rows verified (' + elapsed + 'ms)');
+  _results.push({ key: 'checkpoint_stress', value: 'PASS (' + CYCLES + ' cycles, ' + elapsed + 'ms)' });
+}
+
+// =========================================================================
+// Test 4: FD leak detection — rapid open/close cycles
+//
+// Creates and destroys 30 databases. If FDs leak, later opens will fail
+// because WasmFS has a finite FD table (typically 1024).
+// =========================================================================
+async function test4_fdLeaks(RUN_ID) {
+  addLog('info', '=== Test 4: FD leak detection — 30 rapid DB lifecycles ===');
+  const t0 = Date.now();
+  const PREFIX = 'dur4_' + RUN_ID;
+  const CYCLES = 30;
+
+  for (let c = 0; c < CYCLES; c++) {
+    const db = await makeDB(PREFIX + '_c' + c, 4);
+    const conn = await db.connect();
+
+    // Do real work: create table, write parquet, read it back
+    await conn.query(`CREATE TABLE fd_test AS SELECT i, repeat('y', 50) AS data FROM generate_series(1, 500) t(i)`);
+    const pqFile = PREFIX + '_pq_' + c + '.parquet';
+    await conn.query(`COPY fd_test TO 'opfs://${pqFile}' (FORMAT PARQUET)`);
+    const n = getFirstInt(await conn.query(`SELECT count(*) FROM 'opfs://${pqFile}'`));
+    if (n !== 500) throw new Error('Cycle ' + c + ': parquet read got ' + n);
+
+    await conn.close();
+    await db.terminate();
+
+    if (c % 10 === 0) addLog('info', 'FD cycle ' + c + '/' + CYCLES + ' OK');
+  }
+
+  // Final cycle: if FDs leaked, this will fail with EMFILE or similar
+  const db = await makeDB(PREFIX + '_final', 4);
+  const conn = await db.connect();
+  const v = getFirstInt(await conn.query('SELECT 42'));
+  if (v !== 42) throw new Error('Final sanity check failed');
+  await conn.close();
+  await db.terminate();
+
+  await cleanOPFS(PREFIX);
+
+  const elapsed = Date.now() - t0;
+  addLog('info', 'Test 4 PASS: ' + CYCLES + ' lifecycle cycles, no FD exhaustion (' + elapsed + 'ms)');
+  _results.push({ key: 'fd_leak_detection', value: 'PASS (' + CYCLES + ' cycles, ' + elapsed + 'ms)' });
+}
+
+// =========================================================================
+// Test 5: Ungraceful termination + recovery
+//
+// Writes data, terminates the worker WITHOUT closing the DB or flushing,
+// then restarts and verifies the DB opens and data is at least partially
+// recoverable. Must not crash or produce corrupt state.
+// =========================================================================
+async function test5_crashRecovery(RUN_ID) {
+  addLog('info', '=== Test 5: Ungraceful termination + recovery ===');
+  const t0 = Date.now();
+  const PREFIX = 'dur5_' + RUN_ID;
+
+  // Phase 1: Write data and checkpoint to ensure baseline is on disk
+  let db = await makeDB(PREFIX, 1);
+  let conn = await db.connect();
+  await conn.query("SET wal_autocheckpoint = '1TB'");
+  await conn.query('CREATE TABLE recovery_test (id INT, val VARCHAR)');
+  await conn.query(`INSERT INTO recovery_test SELECT i, 'baseline_' || i FROM generate_series(1, 1000) t(i)`);
+  await conn.query('CHECKPOINT'); // flush baseline to disk
+  addLog('info', 'Baseline: 1000 rows checkpointed');
+
+  // Phase 2: Write more data WITHOUT checkpoint, then hard-terminate
+  await conn.query(`INSERT INTO recovery_test SELECT i, 'dirty_' || i FROM generate_series(1001, 2000) t(i)`);
+  const preTermCount = getFirstInt(await conn.query('SELECT count(*) FROM recovery_test'));
+  addLog('info', 'Pre-terminate: ' + preTermCount + ' rows (1000 checkpointed + 1000 in WAL)');
+
+  // Hard terminate — do NOT close conn or db
+  await db.terminate();
+  db = null;
+
+  // Phase 3: Reopen and verify
+  db = await makeDB(PREFIX, 1);
+  conn = await db.connect();
+
+  let recovered;
+  try {
+    recovered = getFirstInt(await conn.query('SELECT count(*) FROM recovery_test'));
+  } catch (e) {
+    // If the table doesn't exist at all, that's a problem
+    throw new Error('Recovery failed — cannot read table: ' + e.message);
+  }
+
+  addLog('info', 'Recovered: ' + recovered + ' rows');
+
+  // At minimum, the checkpointed 1000 rows must survive
+  if (recovered < 1000) {
+    throw new Error('Recovery lost checkpointed data: expected >= 1000, got ' + recovered);
+  }
+
+  // Verify the recovered data is actually readable (not corrupt)
+  const baseline = getFirstInt(await conn.query(`SELECT count(*) FROM recovery_test WHERE val LIKE 'baseline_%'`));
+  if (baseline !== 1000) {
+    throw new Error('Baseline data corrupt: expected 1000, got ' + baseline);
+  }
+
+  // The dirty rows may or may not survive — that's OK
+  const dirty = getFirstInt(await conn.query(`SELECT count(*) FROM recovery_test WHERE val LIKE 'dirty_%'`));
+  addLog('info', 'Recovery detail: ' + baseline + ' baseline + ' + dirty + ' dirty (WAL replay ' + (dirty === 1000 ? 'full' : 'partial') + ')');
+
+  // Verify the DB is usable after recovery — can we write new data?
+  await conn.query(`INSERT INTO recovery_test VALUES (9999, 'post_recovery')`);
+  const postWrite = getFirstInt(await conn.query(`SELECT count(*) FROM recovery_test WHERE val = 'post_recovery'`));
+  if (postWrite !== 1) throw new Error('Post-recovery write failed');
+
+  await conn.close();
+  await db.terminate();
+  await cleanOPFS(PREFIX);
+
+  const elapsed = Date.now() - t0;
+  addLog('info', 'Test 5 PASS: crash recovery OK, ' + recovered + ' rows recovered, DB usable after (' + elapsed + 'ms)');
+  _results.push({ key: 'crash_recovery', value: 'PASS (recovered ' + recovered + '/' + preTermCount + ', ' + elapsed + 'ms)' });
+}
+
+// =========================================================================
+// Test 6: Concurrent parallel queries writing to OPFS
+//
+// Multiple connections run simultaneous COPY TO OPFS queries. Tests whether
+// WasmFS pwrite serialization holds under real thread contention.
+// =========================================================================
+async function test6_concurrentWrites(RUN_ID) {
+  addLog('info', '=== Test 6: Concurrent parallel writes to OPFS ===');
+  const t0 = Date.now();
+  const PREFIX = 'dur6_' + RUN_ID;
+  const db = await makeDB(PREFIX, 4);
+
+  // Create source table
+  const conn0 = await db.connect();
+  await conn0.query(`CREATE TABLE src AS SELECT i, repeat('z', 100) AS data FROM generate_series(1, 5000) t(i)`);
+  await conn0.close();
+
+  // Launch N connections that each COPY to a different file simultaneously
+  const N = 6;
+  const promises = [];
+  for (let i = 0; i < N; i++) {
+    const p = (async () => {
+      const c = await db.connect();
+      await c.query(`COPY (SELECT * FROM src WHERE i % ${N} = ${i}) TO 'opfs://${PREFIX}_part_${i}.parquet' (FORMAT PARQUET)`);
+      await c.close();
+      return i;
+    })();
+    promises.push(p);
+  }
+
+  const results = await Promise.all(promises);
+  addLog('info', 'All ' + N + ' concurrent COPY operations completed');
+
+  // Verify each file independently
+  const conn1 = await db.connect();
+  let totalRows = 0;
+  for (let i = 0; i < N; i++) {
+    const n = getFirstInt(await conn1.query(`SELECT count(*) FROM 'opfs://${PREFIX}_part_${i}.parquet'`));
+    if (n === null || n <= 0) throw new Error('Partition ' + i + ': empty or unreadable');
+    totalRows += n;
+  }
+
+  if (totalRows !== 5000) {
+    throw new Error('Total rows across partitions: expected 5000, got ' + totalRows);
+  }
+
+  // Verify no corruption: union all partitions and check distinct count
+  const unionParts = Array.from({length: N}, (_, i) =>
+    `SELECT * FROM 'opfs://${PREFIX}_part_${i}.parquet'`
+  ).join(' UNION ALL ');
+  const distinctCount = getFirstInt(await conn1.query('SELECT count(DISTINCT i) FROM (' + unionParts + ')'));
+  if (distinctCount !== 5000) {
+    throw new Error('Distinct ID count: expected 5000, got ' + distinctCount);
+  }
+
+  await conn1.close();
+  await db.terminate();
+  await cleanOPFS(PREFIX);
+
+  const elapsed = Date.now() - t0;
+  addLog('info', 'Test 6 PASS: ' + N + ' concurrent writes, ' + totalRows + ' rows verified (' + elapsed + 'ms)');
+  _results.push({ key: 'concurrent_writes', value: 'PASS (' + N + ' partitions, ' + elapsed + 'ms)' });
+}
+
+// =========================================================================
+// Main runner
+// =========================================================================
+async function run() {
+  const t0 = Date.now();
+  const RUN_ID = Date.now().toString(36);
+
+  try {
+    addLog('info', 'CrossOriginIsolated: ' + crossOriginIsolated);
+    if (!crossOriginIsolated) throw new Error('CrossOriginIsolated required');
+
+    await cleanOPFS('dur');
+
+    mod = await import('/dist/duckdb-browser.mjs');
+
+    await test1_memoryPressure(RUN_ID);
+    await test2_globBehavior(RUN_ID);
+    await test3_checkpointStress(RUN_ID);
+    await test4_fdLeaks(RUN_ID);
+    await test5_crashRecovery(RUN_ID);
+    await test6_concurrentWrites(RUN_ID);
+
+    const elapsed = Date.now() - t0;
+    addLog('info', 'All durability tests passed in ' + elapsed + 'ms');
+    sendReport('PASS');
+
+  } catch (e) {
+    addLog('error', 'FAIL: ' + e.message + '\n' + (e.stack || ''));
+    sendReport('FAIL', { error: e.message, stack: e.stack || '' });
+  }
+}
+
+run();
+</script>
+</body>
+</html>

@@ -65,7 +65,7 @@ struct HashRowBindData : public FunctionData {
         auto c = make_uniq<HashRowBindData>();
         c->field_idx  = field_idx;
         c->field_name = field_name;
-        return c;
+        return std::move(c);
     }
     bool Equals(const FunctionData &other) const override {
         auto &o = other.Cast<HashRowBindData>();
@@ -108,7 +108,7 @@ static unique_ptr<FunctionData> HashRowBind(
         }
     }
 
-    return bd;
+    return std::move(bd);
 }
 
 static void HashRowScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -413,7 +413,7 @@ struct HashJsonKeysTableBindData : public FunctionData {
     unique_ptr<FunctionData> Copy() const override {
         auto c = make_uniq<HashJsonKeysTableBindData>();
         c->key_names = key_names;
-        return c;
+        return std::move(c);
     }
     bool Equals(const FunctionData &other) const override {
         return key_names == other.Cast<HashJsonKeysTableBindData>().key_names;
@@ -448,7 +448,7 @@ static unique_ptr<FunctionData> HashJsonKeysTableBind(
 
     return_types = {LogicalType::UINTEGER};
     names = {"hash"};
-    return bd;
+    return std::move(bd);
 }
 
 static OperatorResultType HashJsonKeysTableInOutFunc(
@@ -516,7 +516,7 @@ struct MetricTableBindData : public FunctionData {
         c->series_id_key  = series_id_key;
         c->parent_keys    = parent_keys;
         c->target_key     = target_key;
-        return c;
+        return std::move(c);
     }
     bool Equals(const FunctionData &other) const override {
         auto &o = other.Cast<MetricTableBindData>();
@@ -574,7 +574,7 @@ static unique_ptr<FunctionData> MetricTableBind(
     };
     names = {"vals", "series_id", "parent_match_hash", "target_match_hash",
              "target_value_hash", "value", "count"};
-    return bd;
+    return std::move(bd);
 }
 
 static OperatorResultType MetricTableInOutFunc(

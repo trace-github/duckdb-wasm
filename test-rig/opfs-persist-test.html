@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
-<head><title>DuckDB-WASM OPFS Persistence Test</title></head>
+<head>
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script><title>DuckDB-WASM OPFS Persistence Test</title></head>
 <body>
 <pre id="output">Starting OPFS persistence test...</pre>
 <script>
@@ -42,8 +43,12 @@ window.onunhandledrejection = function(e) {
 </script>
 <script type="module">
 
-function bufText(buf) {
-  return new TextDecoder().decode(new Uint8Array(buf));
+// conn.query() returns an Arrow Table. Extract first column of first row.
+function getFirstVal(table) {
+  const row = table.get(0);
+  if (!row) return null;
+  const col = table.schema.fields[0].name;
+  return row[col];
 }
 
 function fmtBytes(n) {
@@ -98,15 +103,26 @@ async function run() {
       throw new Error('This test requires COI mode');
     }
 
-    const mod = await import('/dist/duckdb-wasm.mjs');
-    const { AsyncDuckDB, ConsoleLogger } = mod;
+    const mod = await import('/dist/duckdb-browser.mjs');
+    const { AsyncDuckDB, selectBundle, ConsoleLogger, createWorker } = mod;
     const logger = new ConsoleLogger();
 
-    const bundleConfig = {
-      mainModule: '/dist/duckdb-coi.wasm',
-      mainWorker: '/dist/duckdb-browser-coi.worker.js',
-      pthreadWorker: '/dist/duckdb-browser-coi.pthread.worker.js',
+    const DUCKDB_BUNDLES = {
+      eh: {
+        mainModule: new URL('/dist/duckdb-eh.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-eh.worker.js', window.location.href).href,
+      },
+      coi: {
+        mainModule: new URL('/dist/duckdb-coi.wasm', window.location.href).href,
+        mainWorker: new URL('/dist/duckdb-browser-coi.worker.js', window.location.href).href,
+        pthreadWorker: new URL('/dist/duckdb-browser-coi.pthread.worker.js', window.location.href).href,
+      },
     };
+
+    addLog('info', 'Selecting bundle...');
+    const bundle = await selectBundle(DUCKDB_BUNDLES);
+    const bundleName = bundle.mainModule.match(/duckdb-(\w+)\.wasm/)[1];
+    addLog('info', 'Selected bundle: ' + bundleName);
 
     const dbName = 'persist_stress_' + Date.now() + '.db';
     const prefix = dbName.replace('.db', '');
@@ -124,10 +140,9 @@ async function run() {
     // --- Phase 1: Create database, write enormous table ---
     addLog('info', '=== Phase 1: Write enormous table to OPFS ===');
 
-    const worker1 = new Worker(bundleConfig.mainWorker);
-    worker1.onerror = (e) => addLog('error', 'Worker1 error: ' + (e.message || e));
+    const worker1 = await createWorker(bundle.mainWorker);
     const db1 = new AsyncDuckDB(logger, worker1);
-    await db1.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+    await db1.instantiate(bundle.mainModule, bundle.pthreadWorker);
 
     await db1.open({
       path: 'opfs://' + dbName,
@@ -184,19 +199,19 @@ async function run() {
     addLog('info', 'All rows inserted in ' + insertElapsed + 'ms');
 
     // Verify row count
-    const countBuf = await conn1.query("SELECT count(*)::INTEGER AS n FROM enormous");
-    const countText = bufText(countBuf);
-    addLog('info', 'Row count verified: ' + countText.length + 'B response');
+    const countResult = await conn1.query("SELECT count(*)::INTEGER AS n FROM enormous");
+    const countVal = Number(countResult.get(0).n);
+    addLog('info', 'Row count verified: ' + countVal);
     _results.push({ label: 'rows_written', value: TARGET_ROWS.toLocaleString() });
 
-    // Check table size estimate via pragma
-    const sizeBuf = await conn1.query(`
+    // Check table size estimate
+    const sizeResult = await conn1.query(`
       SELECT
         count(*)::INTEGER AS row_count,
         (count(*) * 120)::BIGINT AS est_bytes
       FROM enormous
     `);
-    addLog('info', 'Size query OK');
+    addLog('info', 'Size query OK: ' + Number(sizeResult.get(0).row_count) + ' rows');
 
     // --- Phase 2: Close and flush to OPFS ---
     addLog('info', '=== Phase 2: Close database, flush to OPFS ===');
@@ -253,10 +268,9 @@ async function run() {
     // --- Phase 4: Reopen and verify data survived ---
     addLog('info', '=== Phase 4: Reopen database, verify data ===');
 
-    const worker2 = new Worker(bundleConfig.mainWorker);
-    worker2.onerror = (e) => addLog('error', 'Worker2 error: ' + (e.message || e));
+    const worker2 = await createWorker(bundle.mainWorker);
     const db2 = new AsyncDuckDB(logger, worker2);
-    await db2.instantiate(bundleConfig.mainModule, bundleConfig.pthreadWorker);
+    await db2.instantiate(bundle.mainModule, bundle.pthreadWorker);
 
     await db2.open({
       path: 'opfs://' + dbName,
@@ -267,11 +281,11 @@ async function run() {
 
     const conn2 = await db2.connect();
 
-    // Verify row count using string matching (avoids int32/int64 parsing issues)
+    // Verify row count
     const recount = await conn2.query("SELECT count(*)::VARCHAR AS n FROM enormous");
-    const recountText = bufText(recount);
-    if (!recountText.includes(String(TARGET_ROWS))) {
-      throw new Error('Row count mismatch after reopen. Expected ' + TARGET_ROWS + ' in: ' + recountText.substring(0, 200));
+    const recountVal = String(recount.get(0).n);
+    if (recountVal !== String(TARGET_ROWS)) {
+      throw new Error('Row count mismatch after reopen. Expected ' + TARGET_ROWS + ', got ' + recountVal);
     }
     addLog('info', 'Row count verified: ' + TARGET_ROWS.toLocaleString() + ' rows survived restart');
     _results.push({ label: 'rows_after_reopen', value: TARGET_ROWS.toLocaleString() });
@@ -287,16 +301,16 @@ async function run() {
     const spotEnd = await conn2.query("SELECT id::INTEGER, category::INTEGER FROM enormous WHERE id = " + TARGET_ROWS);
     addLog('info', 'Spot check row ' + TARGET_ROWS.toLocaleString() + ' OK');
 
-    // Verify aggregates using string matching
-    const aggBuf = await conn2.query(
+    // Verify aggregates
+    const aggResult = await conn2.query(
       "SELECT min(id)::VARCHAR AS mn, max(id)::VARCHAR AS mx, count(DISTINCT category)::VARCHAR AS cats FROM enormous"
     );
-    const aggText = bufText(aggBuf);
-    const hasMin1 = aggText.includes('1');
-    const hasMax = aggText.includes(String(TARGET_ROWS));
-    const has1000 = aggText.includes('1000');
-    if (!hasMin1 || !hasMax || !has1000) {
-      throw new Error('Aggregate check failed. Expected min=1, max=' + TARGET_ROWS + ', cats=1000 in: ' + aggText.substring(0, 200));
+    const aggRow = aggResult.get(0);
+    const aggMin = String(aggRow.mn);
+    const aggMax = String(aggRow.mx);
+    const aggCats = String(aggRow.cats);
+    if (aggMin !== '1' || aggMax !== String(TARGET_ROWS) || aggCats !== '1000') {
+      throw new Error('Aggregate check failed. min=' + aggMin + ', max=' + aggMax + ', cats=' + aggCats + '. Expected min=1, max=' + TARGET_ROWS + ', cats=1000');
     }
     addLog('info', 'Aggregates verified: min=1, max=' + TARGET_ROWS.toLocaleString() + ', 1000 categories');
     _results.push({ label: 'data_integrity', value: 'OK' });

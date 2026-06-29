@@ -21,25 +21,9 @@ export function failWith(mod: DuckDBModule, msg: string): void {
     mod.ccall('duckdb_web_fail_with', null, ['string'], [msg]);
 }
 
-/** In COI mode, another pthread can grow WASM memory at any time. When that
- *  happens, wasmMemory.buffer changes but Module.HEAPU8/HEAPF64 still point
- *  to views over the old (smaller) buffer. Emscripten's own GROWABLE_HEAP_*
- *  wrappers handle this for generated glue code, but our TS bypasses them.
- *  This mirrors that check: compare wasmMemory.buffer to HEAPU8.buffer and
- *  refresh the views if they diverge. No-op for EH/MVP (wasmMemory unset). */
-export function ensureFreshMemoryViews(mod: DuckDBModule): void {
-    const wm = mod.wasmMemory;
-    if (wm && wm.buffer !== mod.HEAPU8.buffer) {
-        const b = wm.buffer;
-        mod.HEAPU8 = new Uint8Array(b);
-        mod.HEAPF64 = new Float64Array(b);
-    }
-}
-
 /** Copy a buffer */
 export function copyBuffer(mod: DuckDBModule, begin: number, length: number): Uint8Array {
-    ensureFreshMemoryViews(mod);
-    const buffer = new Uint8Array(mod.HEAPU8.buffer, begin, length);
+    const buffer = new Uint8Array(mod.HEAPU8.buffer, begin >>> 0, length);
     const copy = new Uint8Array(new ArrayBuffer(buffer.byteLength));
     copy.set(buffer);
     return copy;
@@ -47,8 +31,7 @@ export function copyBuffer(mod: DuckDBModule, begin: number, length: number): Ui
 
 /** Decode a string */
 export function readString(mod: DuckDBModule, begin: number, length: number): string {
-    ensureFreshMemoryViews(mod);
-    return decodeText(new Uint8Array(mod.HEAPU8.buffer, begin, length));
+    return decodeText(new Uint8Array(mod.HEAPU8.buffer, begin >>> 0, length));
 }
 
 /** The data protocol */
@@ -133,11 +116,8 @@ export function callSRet(
     argTypes.unshift('number');
     args.unshift(response);
 
-    // Do the call — may trigger memory.grow() on this or another thread
+    // Do the call
     mod.ccall(funcName, null, argTypes, args);
-
-    // Refresh heap views in case memory grew during ccall
-    ensureFreshMemoryViews(mod);
 
     // Read the response
     const status = mod.HEAPF64[(response >> 3) + 0];
@@ -208,17 +188,17 @@ export const DEFAULT_RUNTIME: DuckDBRuntime = {
 
     testPlatformFeature: (_mod: DuckDBModule, _feature: number): boolean => false,
     getDefaultDataProtocol: (_mod: DuckDBModule): number => DuckDBDataProtocol.BUFFER,
-    openFile: (_mod: DuckDBModule, _fileId: number, flags: FileFlags): void => { },
-    syncFile: (_mod: DuckDBModule, _fileId: number): void => { },
-    closeFile: (_mod: DuckDBModule, _fileId: number): void => { },
-    dropFile: (_mod: DuckDBModule, _fileNamePtr: number, _fileNameLen: number): void => { },
+    openFile: (_mod: DuckDBModule, _fileId: number, flags: FileFlags): void => {},
+    syncFile: (_mod: DuckDBModule, _fileId: number): void => {},
+    closeFile: (_mod: DuckDBModule, _fileId: number): void => {},
+    dropFile: (_mod: DuckDBModule, _fileNamePtr: number, _fileNameLen: number): void => {},
     getLastFileModificationTime: (_mod: DuckDBModule, _fileId: number): number => {
         return 0;
     },
     progressUpdate: (_final: number, _percentage: number, _iteration: number): void => {
         return;
     },
-    truncateFile: (_mod: DuckDBModule, _fileId: number, _newSize: number): void => { },
+    truncateFile: (_mod: DuckDBModule, _fileId: number, _newSize: number): void => {},
     readFile: (_mod: DuckDBModule, _fileId: number, _buffer: number, _bytes: number, _location: number): number => {
         return 0;
     },
@@ -226,20 +206,20 @@ export const DEFAULT_RUNTIME: DuckDBRuntime = {
         return 0;
     },
 
-    removeDirectory: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => { },
+    removeDirectory: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => {},
     checkDirectory: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): boolean => {
         return false;
     },
-    createDirectory: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => { },
+    createDirectory: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => {},
     listDirectoryEntries: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): boolean => {
         return false;
     },
-    glob: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => { },
-    moveFile: (_mod: DuckDBModule, _fromPtr: number, _fromLen: number, _toPtr: number, _toLen: number): void => { },
+    glob: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => {},
+    moveFile: (_mod: DuckDBModule, _fromPtr: number, _fromLen: number, _toPtr: number, _toLen: number): void => {},
     checkFile: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): boolean => {
         return false;
     },
-    removeFile: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => { },
+    removeFile: (_mod: DuckDBModule, _pathPtr: number, _pathLen: number): void => {},
     callScalarUDF: (
         mod: DuckDBModule,
         response: number,

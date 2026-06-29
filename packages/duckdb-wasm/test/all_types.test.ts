@@ -36,6 +36,7 @@ const NOT_IMPLEMENTED_TYPES = [
     'timestamp_ms',
     'timestamp_ns',
     'time_tz',
+    'time_ns',
     'timestamp_tz',
     'hugeint',
     'dec_18_6',
@@ -46,6 +47,7 @@ const NOT_IMPLEMENTED_TYPES = [
     'date_array',
     'timestamp_array',
     'timestamptz_array',
+    'geometry',
 ];
 
 // These types are supported, but not the full range returned from the test_all_types() table function, here we define
