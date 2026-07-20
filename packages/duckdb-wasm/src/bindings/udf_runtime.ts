@@ -1,17 +1,17 @@
-import { DuckDBRuntime } from './runtime';
+import { DuckDBRuntime, decodeText, viewHeapU8, viewHeapF64 } from './runtime';
 import { DuckDBModule } from './duckdb_module';
 
 const TEXT_ENCODER = new TextEncoder();
-const TEXT_DECODER = new TextDecoder('utf-8');
 
 function storeError(mod: DuckDBModule, response: number, message: string) {
     const msgBuffer = TEXT_ENCODER.encode(message);
     const heapAddr = mod._malloc(msgBuffer.byteLength);
-    const heapArray = mod.HEAPU8.subarray(heapAddr, heapAddr + msgBuffer.byteLength);
+    const heapArray = viewHeapU8(mod, heapAddr, msgBuffer.byteLength);
     heapArray.set(msgBuffer);
-    mod.HEAPF64[(response >> 3) + 0] = 1;
-    mod.HEAPF64[(response >> 3) + 1] = heapAddr;
-    mod.HEAPF64[(response >> 3) + 2] = heapArray.byteLength;
+    const responseView = viewHeapF64(mod, response, 3);
+    responseView[0] = 1;
+    responseView[1] = heapAddr;
+    responseView[2] = heapArray.byteLength;
 }
 
 function getTypeSize(ptype: string) {
@@ -33,7 +33,7 @@ function getTypeSize(ptype: string) {
 }
 
 function ptrToArray(mod: DuckDBModule, ptr: number, ptype: string, n: number) {
-    const heap = mod.HEAPU8.subarray(ptr, ptr + n * getTypeSize(ptype));
+    const heap = viewHeapU8(mod, ptr, n * getTypeSize(ptype));
     switch (ptype) {
         case 'UINT8':
             return new Uint8Array(heap.buffer, heap.byteOffset, n);
@@ -53,12 +53,10 @@ function ptrToArray(mod: DuckDBModule, ptr: number, ptype: string, n: number) {
 }
 
 function ptrToUint8Array(mod: DuckDBModule, ptr: number, n: number) {
-    const heap = mod.HEAPU8.subarray(ptr, ptr + n);
-    return new Uint8Array(heap.buffer, heap.byteOffset, n);
+    return viewHeapU8(mod, ptr, n);
 }
 function ptrToFloat64Array(mod: DuckDBModule, ptr: number, n: number) {
-    const heap = mod.HEAPU8.subarray(ptr, ptr + n * 8);
-    return new Float64Array(heap.buffer, heap.byteOffset, n);
+    return viewHeapF64(mod, ptr, n);
 }
 
 interface ArgumentTypeDescription {
@@ -101,7 +99,7 @@ export function callScalarUDF(
             storeError(mod, response, 'Unknown UDF with id: ' + funcId);
             return;
         }
-        const rawDesc = TEXT_DECODER.decode(mod.HEAPU8.subarray(descPtr, descPtr + descSize));
+        const rawDesc = decodeText(viewHeapU8(mod, descPtr, descSize));
         const desc = JSON.parse(rawDesc) as SchemaDescription;
         const ptrs = ptrToFloat64Array(mod, ptrsPtr, ptrsSize / 8);
 
@@ -126,11 +124,8 @@ export function callScalarUDF(
                             strings.push(null);
                             continue;
                         }
-                        const subarray = mod.HEAPU8.subarray(
-                            raw[j] as number,
-                            (raw[j] as number) + (stringLengths[j] as number),
-                        );
-                        const str = TEXT_DECODER.decode(subarray);
+                        const subarray = viewHeapU8(mod, raw[j] as number, stringLengths[j] as number);
+                        const str = decodeText(subarray);
                         strings.push(str);
                     }
                     return (row: number) => strings[row];
@@ -236,7 +231,7 @@ export function callScalarUDF(
 
                 // We malloc a buffer for the strings to live in for now
                 const resultStringPtr = mod._malloc(totalLength);
-                const resultStringBuf = mod.HEAPU8.subarray(resultStringPtr, resultStringPtr + totalLength);
+                const resultStringBuf = viewHeapU8(mod, resultStringPtr, totalLength);
 
                 // Now copy all the strings to the new buffer back to back
                 let writerOffset = 0;
@@ -259,9 +254,10 @@ export function callScalarUDF(
         retBuffer[2] = resultLengthsPtr;
 
         // Pack response
-        mod.HEAPF64[(response >> 3) + 0] = 0;
-        mod.HEAPF64[(response >> 3) + 1] = retPtr;
-        mod.HEAPF64[(response >> 3) + 2] = 0;
+        const responseView = viewHeapF64(mod, response, 3);
+        responseView[0] = 0;
+        responseView[1] = retPtr;
+        responseView[2] = 0;
     } catch (e: any) {
         storeError(mod, response, e.toString());
     }

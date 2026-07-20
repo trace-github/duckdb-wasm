@@ -1,4 +1,5 @@
 import { DuckDBBindings, DuckDBDataProtocol, DuckDBFeature } from '../bindings';
+import { setHTTPOptions } from '../bindings/http_options';
 import { WorkerResponseVariant, WorkerRequestVariant, WorkerRequestType, WorkerResponseType } from './worker_request';
 import { Logger, LogEntryVariant } from '../log';
 import { InstantiationProgress } from '../bindings/progress';
@@ -135,6 +136,12 @@ export abstract class AsyncDuckDBDispatcher implements Logger {
                     break;
 
                 case WorkerRequestType.OPEN: {
+                    // trace fork: activate HTTP options (cookies/headers)
+                    // before the database opens; the C++ config parser
+                    // ignores the extra key.
+                    if (request.data.http !== undefined) {
+                        setHTTPOptions(request.data.http ?? null);
+                    }
                     const path = request.data.path;
                     const hasWasmFS = !!(this._bindings!.getFeatureFlags() & DuckDBFeature.WASMFS);
                     if (path?.startsWith('opfs://') && !hasWasmFS) {

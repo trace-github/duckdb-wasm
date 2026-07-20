@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8">
+<script type="importmap">{"imports":{"apache-arrow":"/arrow-bundle.mjs"}}</script>
+<title>XHR http options (cookies + headers) e2e</title></head>
+<body>
+<pre id="out">running…</pre>
+<script type="module">
+// E2E for the TRACE_XHR_HTTP_OPTIONS shim in the patched worker bundles,
+// using the first-class API: db.open({ http: {...} }).
+//
+// Phase "control":    open() without http config — requests must carry
+//                     neither cookies nor custom headers (stock behavior).
+// Phase "configured": open({ http }) on a STOCK worker (no blob bootstrap) —
+//                     read_csv() must carry the cookie + custom header; quack
+//                     ATTACH (via the CORS-fixing proxy) must carry the
+//                     cookie. maximumThreads forces a pthread pool, which
+//                     spawns during instantiate() BEFORE open(), so this also
+//                     exercises the OPEN -> pthread config re-broadcast.
+import * as duckdb from '/dist/duckdb-browser.mjs';
+
+const DATA_ORIGIN = 'http://localhost:9879';
+const QUACK_PROXY = 'localhost:9880';
+const TOKEN = 'super_secret';
+const out = document.getElementById('out');
+const log = (m) => { out.textContent += '\n' + m; console.log('[page] ' + m); };
+
+// Host-only cookie for "localhost" — ports are irrelevant for cookies, so it
+// applies to the data server and quack proxy origins too.
+document.cookie = 'trace_test=yes; path=/';
+
+async function openDb(httpConfig) {
+  const abs = (p) => new URL(p, window.location.href).href;
+  const bundle = await duckdb.selectBundle({
+    eh: { mainModule: abs('/dist/duckdb-eh.wasm'), mainWorker: abs('/dist/duckdb-browser-coi.worker.js') },
+    coi: {
+      mainModule: abs('/dist/duckdb-coi.wasm'),
+      mainWorker: abs('/dist/duckdb-browser-coi.worker.js'),
+      pthreadWorker: abs('/dist/duckdb-browser-coi.pthread.worker.js'),
+    },
+  });
+  const worker = new Worker(bundle.mainWorker);
+  const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
+  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+  await db.open({
+    allowUnsignedExtensions: true,
+    maximumThreads: 4,
+    ...(httpConfig ? { http: httpConfig } : {}),
+  });
+  const conn = await db.connect();
+  return { bundle, worker, db, conn };
+}
+
+async function closeDb({ worker, db, conn }) {
+  await conn.close(); await db.terminate(); worker.terminate();
+}
+
+(async () => {
+  const result = {};
+  try {
+    // ---- Phase 1: control (no config) ------------------------------------
+    log('phase control: opening db without http config…');
+    let ctx = await openDb(null);
+    let r = await ctx.conn.query(
+      `SELECT count(*)::INTEGER AS n FROM read_csv('${DATA_ORIGIN}/data.csv?phase=control')`);
+    result.controlRows = Number(r.toArray()[0].n);
+    log('phase control: read_csv rows = ' + result.controlRows);
+    await closeDb(ctx);
+
+    // ---- Phase 2: configured via db.open({ http }) ------------------------
+    // Use GLOB patterns (not literal prefixes) to prove glob matching works
+    // end-to-end in a real browser: one "http://localhost:*" covers both the
+    // data server and the quack proxy (different ports); the header key uses
+    // a trailing "*" to match the data URL including its query string.
+    log('phase configured: opening db with GLOB http config via db.open()…');
+    ctx = await openDb({
+      withCredentials: ['http://localhost:*'],
+      headers: { 'http://localhost:9879/data.csv*': { 'X-Trace-Test': 'e2e' } },
+    });
+
+    r = await ctx.conn.query(
+      `SELECT count(*)::INTEGER AS n FROM read_csv('${DATA_ORIGIN}/data.csv?phase=configured')`);
+    result.configuredRows = Number(r.toArray()[0].n);
+    log('phase configured: read_csv rows = ' + result.configuredRows);
+
+    // ---- Phase 3: quack over the credential-aware proxy -------------------
+    log('phase quack: ATTACH quack:' + QUACK_PROXY + ' …');
+    await ctx.conn.query(`CREATE SECRET quack_secret (TYPE quack, TOKEN '${TOKEN}')`);
+    await ctx.conn.query(`ATTACH 'quack:${QUACK_PROXY}' AS remote`);
+    r = await ctx.conn.query('SELECT id, name FROM remote.products ORDER BY id');
+    result.quackRows = r.toArray().map((row) => row.toJSON()).length;
+    log('phase quack: products rows = ' + result.quackRows);
+    await closeDb(ctx);
+
+    window.__xhrTestResult = result;
+    out.textContent += '\nDONE: ' + JSON.stringify(result);
+  } catch (e) {
+    out.textContent += '\nERROR: ' + ((e && e.stack) || e);
+    window.__xhrTestError = String((e && e.message) || e);
+  }
+})();
+</script>
+</body>
+</html>

@@ -5,7 +5,15 @@ import { InstantiationProgress } from './progress';
 import { DuckDBBindings } from './bindings_interface';
 import { DuckDBConnection } from './connection';
 import { StatusCode, IsArrowBuffer, IsDuckDBWasmRetry } from '../status';
-import { dropResponseBuffers, DuckDBRuntime, readString, callSRet, copyBuffer, DuckDBDataProtocol } from './runtime';
+import {
+    dropResponseBuffers,
+    DuckDBRuntime,
+    readString,
+    callSRet,
+    copyBuffer,
+    viewHeapU8,
+    DuckDBDataProtocol,
+} from './runtime';
 import { CSVInsertOptions, JSONInsertOptions, ArrowInsertOptions } from './insert_options';
 import { ScriptTokens } from './tokens';
 import { FileStatistics } from './file_stats';
@@ -137,7 +145,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     public tokenize(text: string): ScriptTokens {
         const BUF = TEXT_ENCODER.encode(text);
         const bufferPtr = this.mod._malloc(BUF.length) >>> 0;
-        const bufferOfs = new Uint8Array(this.mod.HEAPU8.buffer, bufferPtr, BUF.length);
+        const bufferOfs = viewHeapU8(this.mod, bufferPtr, BUF.length);
         bufferOfs.set(BUF);
         const [s, d, n] = callSRet(
             this.mod,
@@ -176,7 +184,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     public runQuery(conn: number, text: string): Uint8Array {
         const BUF = TEXT_ENCODER.encode(text);
         const bufferPtr = this.mod._malloc(BUF.length) >>> 0;
-        const bufferOfs = new Uint8Array(this.mod.HEAPU8.buffer, bufferPtr, BUF.length);
+        const bufferOfs = viewHeapU8(this.mod, bufferPtr, BUF.length);
         bufferOfs.set(BUF);
         const [s, d, n] = callSRet(
             this.mod,
@@ -201,7 +209,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     public startPendingQuery(conn: number, text: string, allowStreamResult: boolean = false): Uint8Array | null {
         const BUF = TEXT_ENCODER.encode(text);
         const bufferPtr = this.mod._malloc(BUF.length) >>> 0;
-        const bufferOfs = new Uint8Array(this.mod.HEAPU8.buffer, bufferPtr, BUF.length);
+        const bufferOfs = viewHeapU8(this.mod, bufferPtr, BUF.length);
         bufferOfs.set(BUF);
         const [s, d, n] = callSRet(
             this.mod,
@@ -265,7 +273,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     public getTableNames(conn: number, text: string): string[] {
         const BUF = TEXT_ENCODER.encode(text);
         const bufferPtr = this.mod._malloc(BUF.length) >>> 0;
-        const bufferOfs = new Uint8Array(this.mod.HEAPU8.buffer, bufferPtr, BUF.length);
+        const bufferOfs = viewHeapU8(this.mod, bufferPtr, BUF.length);
         bufferOfs.set(BUF);
         const [s, d, n] = callSRet(
             this.mod,
@@ -330,7 +338,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     public createPrepared(conn: number, text: string): number {
         const BUF = TEXT_ENCODER.encode(text);
         const bufferPtr = this.mod._malloc(BUF.length) >>> 0;
-        const bufferOfs = new Uint8Array(this.mod.HEAPU8.buffer, bufferPtr, BUF.length);
+        const bufferOfs = viewHeapU8(this.mod, bufferPtr, BUF.length);
         bufferOfs.set(BUF);
         const [s, d, n] = callSRet(
             this.mod,
@@ -392,7 +400,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
         if (buffer.length == 0) return;
         // Store buffer
         const bufferPtr = this.mod._malloc(buffer.length) >>> 0;
-        const bufferOfs = new Uint8Array(this.mod.HEAPU8.buffer, bufferPtr, buffer.length);
+        const bufferOfs = viewHeapU8(this.mod, bufferPtr, buffer.length);
         bufferOfs.set(buffer);
         const optJSON = options ? JSON.stringify(options) : '';
 
@@ -499,7 +507,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
     /** Register a file buffer */
     public registerFileBuffer(name: string, buffer: Uint8Array): void {
         const ptr = this.mod._malloc(buffer.length) >>> 0;
-        const dst = new Uint8Array(this.mod.HEAPU8.buffer, ptr, buffer.length);
+        const dst = viewHeapU8(this.mod, ptr, buffer.length);
         dst.set(buffer);
         const [s, d, n] = callSRet(
             this.mod,
@@ -691,7 +699,7 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
         if (s !== StatusCode.SUCCESS) {
             throw new Error(readString(this.mod, d, n));
         }
-        const buffer = new Uint8Array(this.mod.HEAPU8.buffer, d >>> 0, n);
+        const buffer = viewHeapU8(this.mod, d >>> 0, n);
         const copy = new Uint8Array(buffer.length);
         copy.set(buffer);
         dropResponseBuffers(this.mod);
@@ -717,6 +725,6 @@ export abstract class DuckDBBindingsBase implements DuckDBBindings {
         if (s !== StatusCode.SUCCESS) {
             throw new Error(readString(this.mod, d, n));
         }
-        return new FileStatistics(new Uint8Array(this.mod.HEAPU8.buffer, d >>> 0, n));
+        return new FileStatistics(viewHeapU8(this.mod, d >>> 0, n));
     }
 }

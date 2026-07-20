@@ -1,6 +1,6 @@
 {
     "name": "@run-trace/duckdb-wasm",
-    "version": "0.5.1",
+    "version": "0.5.5",
     "description": "DuckDB powered by WebAssembly — Trace fork with bundled extensions",
     "license": "MIT",
     "repository": {
@@ -70,7 +70,7 @@
         "test:node:coverage": "nyc -r json --report-dir ./coverage/node node ../../node_modules/jasmine/bin/jasmine ./dist/tests-node.cjs",
         "test:firefox": "karma start ./karma/tests-firefox.cjs",
         "test:chrome": "karma start ./karma/tests-chrome.cjs",
-      "test:chrome:eh": "karma start ./karma/tests-chrome-eh.cjs",
+        "test:chrome:eh": "karma start ./karma/tests-chrome-eh.cjs",
         "test:chrome:coverage": "karma start ./karma/tests-chrome-coverage.cjs",
         "test:browser": "karma start ./karma/tests-all.cjs",
         "test:browser:debug": "karma start ./karma/tests-debug.cjs",

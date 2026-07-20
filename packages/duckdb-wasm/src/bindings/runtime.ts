@@ -21,9 +21,42 @@ export function failWith(mod: DuckDBModule, msg: string): void {
     mod.ccall('duckdb_web_fail_with', null, ['string'], [msg]);
 }
 
+/** Return the wasm heap buffer, guaranteed to cover bytes [0, endByte).
+ *
+ * In the threaded (COI) build wasm memory is a growable SharedArrayBuffer that
+ * any pthread can grow at any time. After a cross-thread growth, this thread's
+ * mod.HEAPU8 still views the old, shorter buffer — Emscripten only refreshes
+ * its views lazily from glue-internal GROWABLE_HEAP accessors — so building a
+ * view past its end throws `RangeError: Invalid typed array length` (and
+ * indexed writes past its end are silently dropped). The exported
+ * stringToUTF8 runs that accessor before its zero-write guard, so calling it
+ * with maxBytesToWrite=0 refreshes mod.HEAPU8 without writing.
+ */
+function freshHeapBuffer(mod: DuckDBModule, endByte: number): ArrayBufferLike {
+    let heap = mod.HEAPU8;
+    if (endByte > heap.buffer.byteLength) {
+        mod.stringToUTF8('', 0, 0);
+        heap = mod.HEAPU8;
+        if (endByte > heap.buffer.byteLength) {
+            throw new Error(`heap view ending at ${endByte} exceeds wasm memory size ${heap.buffer.byteLength}`);
+        }
+    }
+    return heap.buffer;
+}
+
+/** Return a Uint8Array heap view covering bytes [begin, begin + length). */
+export function viewHeapU8(mod: DuckDBModule, begin: number, length: number): Uint8Array {
+    return new Uint8Array(freshHeapBuffer(mod, begin + length), begin, length);
+}
+
+/** Return a Float64Array heap view of `count` doubles at byte pointer `begin` (must be 8-aligned). */
+export function viewHeapF64(mod: DuckDBModule, begin: number, count: number): Float64Array {
+    return new Float64Array(freshHeapBuffer(mod, begin + count * 8), begin, count);
+}
+
 /** Copy a buffer */
 export function copyBuffer(mod: DuckDBModule, begin: number, length: number): Uint8Array {
-    const buffer = new Uint8Array(mod.HEAPU8.buffer, begin >>> 0, length);
+    const buffer = viewHeapU8(mod, begin >>> 0, length);
     const copy = new Uint8Array(new ArrayBuffer(buffer.byteLength));
     copy.set(buffer);
     return copy;
@@ -31,7 +64,7 @@ export function copyBuffer(mod: DuckDBModule, begin: number, length: number): Ui
 
 /** Decode a string */
 export function readString(mod: DuckDBModule, begin: number, length: number): string {
-    return decodeText(new Uint8Array(mod.HEAPU8.buffer, begin >>> 0, length));
+    return decodeText(viewHeapU8(mod, begin >>> 0, length));
 }
 
 /** The data protocol */

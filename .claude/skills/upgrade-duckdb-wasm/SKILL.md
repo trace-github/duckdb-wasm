@@ -247,6 +247,9 @@ Stale build cache — the duckdb ExternalProject wasn't rebuilt after the submod
 **`bundle.mjs` can't read `duckdb-coi.pthread.js`, or COI bundle throws "Module is not defined"**
 Emscripten 4.0.3 emits no standalone pthread worker, so the file is restored from the tracked template `lib/duckdb-coi.pthread.template.js` by `docker-build.sh`. If you bump the Emscripten version, regenerate that template (extract `sourcesContent` for `duckdb-coi.pthread.js` from a published `*.pthread.worker.js.map`). Never `cp duckdb-coi.js`. See `clean-duckdb-wasm`.
 
+**After ANY Emscripten version bump: re-verify the heap-growth guard's glue contract**
+`viewHeapU8`/`viewHeapF64` in `src/bindings/runtime.ts` refresh stale heap views (COI pthread memory growth) by calling `mod.stringToUTF8('', 0, 0)` — this relies on the glue (a) exporting `stringToUTF8` on Module and (b) implementing it as `stringToUTF8Array(str, GROWABLE_HEAP_U8(), ...)` so the staleness check runs before the zero-write guard. Verified for Emscripten 4.0.3. After a bump, grep the new `duckdb-coi.js` glue for `var stringToUTF8 =` and confirm it still evaluates `GROWABLE_HEAP_U8()` (or equivalent view-refresh accessor). If the shape changed, the guard fails loudly (`heap view ending at N exceeds wasm memory size`) rather than corrupting — but it must be re-wired to whatever refresh path the new glue exposes.
+
 **Native extension fails to load after a duckdb bump** ("built for version X, can only load with that version")
 The native `hash_ext` is version-locked to duckdb. Rebuild with `./extensions/hash_ext/build-all.sh` — it builds `osx_arm64`, `osx_amd64`, `linux_amd64`. The npm wasm package doesn't use native builds; the macOS native smoke test uses the `osx_arm64` artifact.
 

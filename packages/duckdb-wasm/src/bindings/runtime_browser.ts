@@ -12,6 +12,8 @@ import {
     failWith,
     FileFlags,
     readString,
+    viewHeapU8,
+    viewHeapF64,
     PreparedDBFileHandle,
 } from './runtime';
 import { DuckDBModule } from './duckdb_module';
@@ -234,11 +236,12 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                         // Return an empty buffer that can be used to buffer the writes to this s3/http file
                         const data = mod._malloc(1);
                         const src = new Uint8Array();
-                        mod.HEAPU8.set(src, data);
+                        viewHeapU8(mod, data, src.byteLength).set(src);
                         const result = mod._malloc(3 * 8);
-                        mod.HEAPF64[(result >> 3) + 0] = 1;
-                        mod.HEAPF64[(result >> 3) + 1] = data;
-                        mod.HEAPF64[(result >> 3) + 2] = new Date().getTime() / 1000;
+                        const resultView = viewHeapF64(mod, result, 3);
+                        resultView[0] = 1;
+                        resultView[1] = data;
+                        resultView[2] = new Date().getTime() / 1000;
                         return result;
                     } else if ((flags & FileFlags.FILE_FLAGS_READ) == 0) {
                         throw new Error(`Opening file ${file.fileName} failed: unsupported file flags: ${flags}`);
@@ -266,11 +269,12 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                             try { contentLength = xhr.getResponseHeader('Content-Length'); } catch (e: any) {console.warn(`Failed to get Content-Length on request`);}
                             if (contentLength !== null && xhr.status == 206) {
                                 const result = mod._malloc(3 * 8);
-                                mod.HEAPF64[(result >> 3) + 0] = +contentLength;
-                                mod.HEAPF64[(result >> 3) + 1] = 0;
+                                const resultView = viewHeapF64(mod, result, 3);
+                                resultView[0] = +contentLength;
+                                resultView[1] = 0;
                                 let modification_time = 0;
                                 try { modification_time = new Date(xhr.getResponseHeader('Last-Modified')??"").getTime() / 1000; } catch (e: any) {console.warn(`Failed to get Last-Modified on request`);}
-                                mod.HEAPF64[(result >> 3) + 2] = +modification_time;
+                                resultView[2] = +modification_time;
                                 return result;
                             }
                         } catch (e: any) {
@@ -332,11 +336,12 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                                 presumedLength !== null
                             ) {
                                 const result = mod._malloc(3 * 8);
-                                mod.HEAPF64[(result >> 3) + 0] = +presumedLength;
-                                mod.HEAPF64[(result >> 3) + 1] = 0;
+                                const resultView = viewHeapF64(mod, result, 3);
+                                resultView[0] = +presumedLength;
+                                resultView[1] = 0;
                                 let modification_time = 0;
                                 try { modification_time = new Date(xhr.getResponseHeader('Last-Modified')??"").getTime() / 1000; } catch (e: any) {console.warn(`Failed to get Last-Modified on request`);}
-                                mod.HEAPF64[(result >> 3) + 2] = +modification_time;
+                                resultView[2] = +modification_time;
                                 return result;
                             }
                             if (
@@ -348,13 +353,14 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                                 console.warn(`fall back to full HTTP read for: ${file.dataUrl}`);
                                 const data = mod._malloc(xhr.response.byteLength);
                                 const src = new Uint8Array(xhr.response, 0, xhr.response.byteLength);
-                                mod.HEAPU8.set(src, data);
+                                viewHeapU8(mod, data, src.byteLength).set(src);
                                 const result = mod._malloc(3 * 8);
-                                mod.HEAPF64[(result >> 3) + 0] = xhr.response.byteLength;
-                                mod.HEAPF64[(result >> 3) + 1] = data;
+                                const resultView = viewHeapF64(mod, result, 3);
+                                resultView[0] = xhr.response.byteLength;
+                                resultView[1] = data;
                                 let modification_time = 0;
                                 try { modification_time = new Date(xhr.getResponseHeader('Last-Modified')??"").getTime() / 1000; } catch (e: any) {console.warn(`Failed to get Last-Modified on request`);}
-                                mod.HEAPF64[(result >> 3) + 2] = +modification_time;
+                                resultView[2] = +modification_time;
                                 return result;
                             }
                             console.warn(`falling back to full HTTP read for: ${file.dataUrl}`);
@@ -374,13 +380,14 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                         if (xhr.status == 200) {
                             const data = mod._malloc(xhr.response.byteLength);
                             const src = new Uint8Array(xhr.response, 0, xhr.response.byteLength);
-                            mod.HEAPU8.set(src, data);
+                            viewHeapU8(mod, data, src.byteLength).set(src);
                             const result = mod._malloc(3 * 8);
-                            mod.HEAPF64[(result >> 3) + 0] = xhr.response.byteLength;
-                            mod.HEAPF64[(result >> 3) + 1] = data;
+                            const resultView = viewHeapF64(mod, result, 3);
+                            resultView[0] = xhr.response.byteLength;
+                            resultView[1] = data;
                             let modification_time = 0;
                             try { modification_time = new Date(xhr.getResponseHeader('Last-Modified')??"").getTime() / 1000; } catch (e: any) {console.warn(`Failed to get Last-Modified on request`);}
-                            mod.HEAPF64[(result >> 3) + 2] = +modification_time;
+                            resultView[2] = +modification_time;
                             return result;
                         }
                     }
@@ -396,9 +403,10 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                     const handle = BROWSER_RUNTIME._files?.get(file.fileName);
                     if (handle) {
                         const result = mod._malloc(3 * 8);
-                        mod.HEAPF64[(result >> 3) + 0] = handle.size;
-                        mod.HEAPF64[(result >> 3) + 1] = 0;
-                        mod.HEAPF64[(result >> 3) + 2] = 0;
+                        const resultView = viewHeapF64(mod, result, 3);
+                        resultView[0] = handle.size;
+                        resultView[1] = 0;
+                        resultView[2] = 0;
                         return result;
                     }
 
@@ -410,10 +418,11 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                     // Fall back to empty buffered file in the browser
                     console.warn(`Buffering missing file: ${file.fileName}`);
                     const result = mod._malloc(3 * 8);
+                    const resultView = viewHeapF64(mod, result, 3);
                     const buffer = mod._malloc(1); // malloc(0) is allowed to return a nullptr
-                    mod.HEAPF64[(result >> 3) + 0] = 1;
-                    mod.HEAPF64[(result >> 3) + 1] = buffer;
-                    mod.HEAPF64[(result >> 3) + 2] = 0;
+                    resultView[0] = 1;
+                    resultView[1] = buffer;
+                    resultView[2] = 0;
                     return result;
                 }
                 case DuckDBDataProtocol.BROWSER_FSACCESS: {
@@ -425,10 +434,11 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                         handle.truncate(0);
                     }
                     const result = mod._malloc(3 * 8);
+                    const resultView = viewHeapF64(mod, result, 3);
                     const fileSize = handle.getSize();
-                    mod.HEAPF64[(result >> 3) + 0] = fileSize;
-                    mod.HEAPF64[(result >> 3) + 1] = 0;
-                    mod.HEAPF64[(result >> 3) + 2] = 0;
+                    resultView[0] = fileSize;
+                    resultView[1] = 0;
+                    resultView[2] = 0;
                     return result;
                 }
             }
@@ -625,7 +635,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                             (xhr.status == 200 && bytes == xhr.response.byteLength && location == 0)
                         ) {
                             const src = new Uint8Array(xhr.response, 0, Math.min(xhr.response.byteLength, bytes));
-                            mod.HEAPU8.set(src, buf);
+                            viewHeapU8(mod, buf, src.byteLength).set(src);
                             return src.byteLength;
                         } else if (xhr.status == 200) {
                             // TODO: here we are actually throwing away all non-relevant bytes, but this is still better than failing
@@ -638,7 +648,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                                 location,
                                 Math.min(xhr.response.byteLength - location, bytes),
                             );
-                            mod.HEAPU8.set(src, buf);
+                            viewHeapU8(mod, buf, src.byteLength).set(src);
                             return src.byteLength;
                         } else {
                             throw new Error(
@@ -657,7 +667,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                     }
                     const sliced = handle!.slice(location, location + bytes);
                     const data = new Uint8Array(new FileReaderSync().readAsArrayBuffer(sliced));
-                    mod.HEAPU8.set(data, buf);
+                    viewHeapU8(mod, buf, data.byteLength).set(data);
                     return data.byteLength;
                 }
                 case DuckDBDataProtocol.BROWSER_FSACCESS: {
@@ -665,7 +675,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                     if (!handle) {
                         throw new Error(`No OPFS access handle registered with name: ${file.fileName}`);
                     }
-                    const out = mod.HEAPU8.subarray(buf, buf + bytes);
+                    const out = viewHeapU8(mod, buf, bytes);
                     return handle.read(out, { at: location });
                 }
             }
@@ -683,7 +693,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                 failWith(mod, 'Cannot write to HTTP file');
                 return 0;
             case DuckDBDataProtocol.S3: {
-                const buffer = mod.HEAPU8.subarray(buf, buf + bytes);
+                const buffer = viewHeapU8(mod, buf, bytes);
                 const xhr = new XMLHttpRequest();
                 xhr.open('PUT', getHTTPUrl(file?.s3Config, file.dataUrl!), false);
                 addS3Headers(xhr, file?.s3Config, file.dataUrl!, 'PUT', '', buffer);
@@ -702,7 +712,7 @@ export const BROWSER_RUNTIME: DuckDBRuntime & {
                 if (!handle) {
                     throw new Error(`No OPFS access handle registered with name: ${file.fileName}`);
                 }
-                const input = mod.HEAPU8.subarray(buf, buf + bytes);
+                const input = viewHeapU8(mod, buf, bytes);
                 return handle.write(input, { at: location });
             }
         }

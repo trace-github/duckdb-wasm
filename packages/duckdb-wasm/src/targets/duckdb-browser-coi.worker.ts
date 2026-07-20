@@ -3,6 +3,11 @@ import { DuckDB } from '../bindings/bindings_browser_coi';
 import { DuckDBBindings } from '../bindings';
 import { BROWSER_RUNTIME } from '../bindings/runtime_browser';
 import { InstantiationProgress } from '../bindings/progress';
+import { installHTTPOptionsHooks } from '../bindings/http_options';
+
+// trace fork: hook engine XHRs (cookies/headers via db.open({ http })) before
+// any request can be issued.
+installHTTPOptionsHooks();
 
 /** The duckdb worker API for web workers */
 class WebWorker extends AsyncDuckDBDispatcher {

@@ -112,6 +112,7 @@ import { longQueries } from './long_queries.test';
 //import { testEXCEL } from './excel.test';
 //import { testJSON } from './json.test';
 import { testPivot } from './pivot.test';
+import { testHeapGrowthGuard } from './heap_growth.test';
 
 const baseURL = window.location.origin;
 const dataURL = `${baseURL}/data`;
@@ -142,3 +143,4 @@ testTokenizationAsync(() => adb!);
 //testEXCEL(() => db!);
 //testJSON(() => db!);
 testPivot(() => db!);
+testHeapGrowthGuard();
